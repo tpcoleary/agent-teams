@@ -619,6 +619,47 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     .topbar-right { gap: 6px; }
     #team-select { flex: 1 1 auto; min-width: 72px; max-width: 132px; }
 }
+/* ===== SLASH COMMAND PALETTE ===== */
+/* Anchor wraps a composer input so the popup can be positioned against it.
+   .controls-section and .control-group have no `position`, so without this the
+   popup would escape to the nearest positioned ancestor. flex sizing is for the
+   two flex-row composers (task box, Architect); harmless in the block-layout
+   respond modal. */
+.cmd-anchor { position: relative; flex: 1 1 auto; min-width: 0; }
+/* z-index is local: the popup only has to beat its own siblings. Deliberately
+   NOT above the .modal-bg / #toast-stack tier (200) — inside the respond modal
+   it is a descendant, so a global bump would only start fighting toasts. */
+.cmd-popup { display: none; position: absolute; left: 0; right: 0; bottom: calc(100% + 5px); z-index: 5;
+    max-height: 264px; overflow-y: auto; background: var(--bg-card);
+    border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+    box-shadow: 0 10px 28px rgba(0,0,0,0.65); }
+.cmd-popup.show { display: block; }
+/* Task box sits at the bottom of its panel, so it opens downward instead. */
+.cmd-popup.below { top: calc(100% + 5px); bottom: auto; }
+.cmd-row { display: flex; gap: 10px; align-items: baseline; padding: 7px 10px;
+    cursor: pointer; border-bottom: 1px solid var(--border); }
+.cmd-row:last-child { border-bottom: none; }
+/* Highlight follows aria-activedescendant, not DOM focus — focus stays in the
+   input so the per-modal Tab trap is not fought over. */
+.cmd-row.active { background: var(--bg-hover); }
+.cmd-row-name { font-family: var(--font-mono); font-size: 12px; color: var(--text); white-space: nowrap; }
+.cmd-row-hint { font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.cmd-row-desc { font-size: 11px; color: var(--text-muted); margin-left: auto;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 58%; }
+.cmd-empty { padding: 9px 10px; font-size: 11px; color: var(--text-dim); }
+.cmd-note { padding: 6px 10px; font-size: 10px; color: var(--text-dim);
+    border-top: 1px solid var(--border); background: var(--bg-input); }
+/* Command output in a toast — /help is long, so cap and scroll it rather than
+   letting one toast run off the screen. */
+.cmd-out { max-height: 300px; overflow-y: auto; }
+.cmd-out p:first-child { margin-top: 0; }
+.cmd-out p:last-child { margin-bottom: 0; }
+@media (prefers-reduced-motion: reduce) {
+    /* PRODUCT.md requires a reduced-motion path for every live/animated
+       affordance; the palette itself only toggles display, but the toast the
+       command result lands in animates in. */
+    .toast { animation: none; }
+}
 </style>
 </head>
 <body>
@@ -737,7 +778,9 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     <div class="panel-body" id="digest-list" style="display:none"><div class="empty-state"><div class="empty-state-icon"><span data-icon="compass" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
     <div class="controls-section">
         <div style="display:flex;gap:5px">
-            <input class="control-input" id="ctrl-payload" placeholder="Message the selected agent…" aria-label="Message the selected agent" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();sendTask();}">
+            <div class="cmd-anchor" id="cmd-anchor-task">
+                <input class="control-input" id="ctrl-payload" placeholder="Message the selected agent, or / for commands…" aria-label="Message the selected agent" style="flex:1">
+            </div>
             <button class="btn" style="width:auto;white-space:nowrap" onclick="sendTask()">Send</button>
         </div>
     </div>
@@ -906,7 +949,9 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     </div>
     <div id="master-exec-line" class="master-exec-line"></div>
     <div class="master-input-row">
-        <textarea id="master-input" class="control-textarea" rows="1" placeholder="Describe your goal, or ask the Architect to build / change a team…" aria-label="Message the Architect" oninput="autoGrowMaster(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMasterMsg();}"></textarea>
+        <div class="cmd-anchor" id="cmd-anchor-master">
+            <textarea id="master-input" class="control-textarea" rows="1" placeholder="Describe your goal, or / for commands…" aria-label="Message the Architect" oninput="autoGrowMaster(this)"></textarea>
+        </div>
         <button class="btn" id="master-send-btn" onclick="sendMasterMsg()">Send</button>
     </div>
 </div>
@@ -942,7 +987,9 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
             <div id="respond-question" style="background:var(--bg);padding:10px;border-radius:5px;font-size:12px;margin-bottom:14px;border:1px solid var(--border)"></div>
             <div class="control-group">
                 <label class="control-label" for="respond-text">Your Response</label>
-                <textarea class="control-textarea" id="respond-text" placeholder="Type your answer..." style="min-height:80px"></textarea>
+                <div class="cmd-anchor" id="cmd-anchor-respond">
+                    <textarea class="control-textarea" id="respond-text" placeholder="Type your answer, or / for commands…" style="min-height:80px"></textarea>
+                </div>
             </div>
             <input type="hidden" id="respond-qid">
             <input type="hidden" id="respond-agent">
@@ -2626,6 +2673,13 @@ async function sendTask() {
     try {
         const res = await fetch(`${API_URL}/agent/${encodeURIComponent(target)}/task`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({from_agent:'human_operator', payload}) });
         const data = await res.json().catch(() => ({}));
+        // Slash command? Answer it in place — nothing was queued, so the normal
+        // "task enqueued" path would be a lie. Checked before res.ok because a
+        // rejected command legitimately returns 400.
+        if (handleCommandResponse(data)) {
+            document.getElementById('ctrl-payload').value = '';
+            return;
+        }
         if (!res.ok || data.error) logEvent('error', `Send failed: ${data.error || res.status}`);
         else { logEvent('task_enqueued', `Manual → ${target}`); document.getElementById('ctrl-payload').value = ''; }
     } catch (e) { logEvent('error', `Send failed: ${e.message}`); }
@@ -3391,8 +3445,14 @@ async function sendMasterMsg() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message }),
         });
+        const d = await res.json().catch(() => ({}));
+        // A command's output is echoed over the master_message WS event (so the
+        // transcript stays coherent), which also clears the busy flag. Return
+        // before the error branch below: a rejected command returns 400 but its
+        // text has already been delivered, and `d.error` is unset so that branch
+        // would append a bare "Error 400" on top of the real message.
+        if (d && d.command === true) { setMasterBusy(false); return; }
         if (!res.ok) {
-            const d = await res.json().catch(() => ({}));
             appendMasterMessage('system', d.error || `Error ${res.status}`);
             setMasterBusy(false);
         }
@@ -3550,6 +3610,12 @@ async function submitResponse() {
             body: JSON.stringify({response: text, question_id: qid}),
         });
         const data = await res.json();
+        // A command run from the reply box does NOT answer the question — leave
+        // the modal open and the question pending, just show the result.
+        if (handleCommandResponse(data)) {
+            document.getElementById('respond-text').value = '';
+            return;
+        }
         if (data.error) { logEvent('error', data.error); return; }
         logEvent('system', `Human responded to ${agentName}`);
         hideModal('modal-respond');
@@ -3717,6 +3783,284 @@ async function rejectProposal(pid) {
     } catch (e) { logEvent('error', e.message); }
 }
 
+/* ===== SLASH COMMAND PALETTE =============================================
+   One factory attached to each human→agent composer. Completes command names,
+   then subcommands, then live argument values (models, agent names).
+
+   Two structural constraints drove this design:
+
+   1. Focus STAYS on the input; the highlighted row is published via
+      aria-activedescendant. Moving real focus into the list would add a
+      focusable to the per-modal Tab trap (wired near the end of this file,
+      which filters on offsetParent !== null) and the two would fight.
+   2. The composers' Enter handlers used to be inline onkeydown attributes.
+      Inline handlers are registered at parse time, so any addEventListener
+      added later runs AFTER them — Enter would have submitted the message
+      before the palette could accept the highlighted row. Rather than shadow
+      that with a capture-phase listener (two mechanisms for one key, wired
+      from two different places), the attributes were removed and the palette
+      owns keydown, calling the onSubmit passed in here.
+   ======================================================================== */
+let commandCatalog = [];
+let commandCatalogHermes = true;
+let _cmdCatalogLoaded = false;
+
+async function loadCommandCatalog() {
+    if (_cmdCatalogLoaded) return commandCatalog;
+    try {
+        const res = await fetch(`${API_URL}/commands`);
+        const data = await res.json();
+        commandCatalog = data.commands || [];
+        commandCatalogHermes = data.hermes !== false;
+        _cmdCatalogLoaded = true;
+    } catch (e) {
+        // Non-fatal: composers keep working as plain text inputs.
+        commandCatalog = [];
+    }
+    return commandCatalog;
+}
+
+/* Mirrors teams_server.commands.looks_like_slash_command so the popup never
+   offers something the server would then reject: the first word starts with "/"
+   and contains no further "/" (which is what separates /model from a pasted
+   /Users/me/notes.md). */
+function looksLikeSlashCommand(text) {
+    if (!text) return false;
+    const s = text.replace(/^\s+/, '');
+    if (!s.startsWith('/')) return false;
+    const first = s.split(/\s+/)[0].slice(1);
+    return first.length > 0 && !first.includes('/');
+}
+
+function _cmdScopeMatch(cmd, scope) {
+    return cmd.scope === 'both' || cmd.scope === scope;
+}
+
+/* When should the popup open? A deliberate SUPERSET of
+   looksLikeSlashCommand: it also fires on a bare "/" so that typing "/" lists
+   every command, which is the whole discovery gesture. For any NON-empty command
+   name the two agree exactly, so the popup never offers something the server
+   would then reject. */
+function commandPopupTriggered(text) {
+    const s = (text || '').replace(/^\s+/, '');
+    if (s === '/') return true;
+    return looksLikeSlashCommand(s);
+}
+
+/* What should the popup offer for the current input value?
+   Returns {items, kind} — kind is 'name' (rewrite the command token) or 'arg'
+   (complete the first argument). */
+function computeCommandSuggestions(value, scope) {
+    const s = (value || '').replace(/^\s+/, '');
+    if (!commandPopupTriggered(s)) return null;
+
+    const parts = s.split(/\s+/);
+    const head = parts[0].slice(1).toLowerCase();
+    const typingArgs = /\s/.test(s);
+    const pool = commandCatalog.filter(c => _cmdScopeMatch(c, scope));
+
+    if (!typingArgs) {
+        // Still typing the command name. Substring match on name and aliases,
+        // prefix matches first — same lowercased-substring style as
+        // renderToolsetChips() elsewhere in this file.
+        const hits = pool.filter(c =>
+            c.name.includes(head) || (c.aliases || []).some(a => a.includes(head)));
+        hits.sort((a, b) => {
+            const ap = a.name.startsWith(head) ? 0 : 1;
+            const bp = b.name.startsWith(head) ? 0 : 1;
+            return ap - bp || a.name.localeCompare(b.name);
+        });
+        return { items: hits.map(c => ({
+            value: '/' + c.name, label: '/' + c.name,
+            hint: c.args_hint || '', desc: c.description })), kind: 'name' };
+    }
+
+    // Past the name: complete arguments for a resolved command.
+    const cmd = pool.find(c => c.name === head || (c.aliases || []).includes(head));
+    if (!cmd) return null;
+    const typed = (parts[parts.length - 1] || '').toLowerCase();
+    // Only complete the FIRST argument; free-text commands like /steer take
+    // prose, so a popup after the first word would just be in the way.
+    if (parts.length > 2) return null;
+
+    let values = [];
+    if ((cmd.subcommands || []).length) {
+        values = cmd.subcommands;
+    } else if (cmd.name === 'model') {
+        values = (typeof modelsCache !== 'undefined' && modelsCache) ? modelsCache : [];
+    }
+    if (!values.length) return null;
+
+    const hits = values.filter(v => String(v).toLowerCase().includes(typed));
+    if (!hits.length) return null;
+    return { items: hits.map(v => ({
+        value: '/' + cmd.name + ' ' + v, label: String(v), hint: '', desc: '' })),
+        kind: 'arg' };
+}
+
+function attachCommandPalette(input, { scope, onSubmit, submitOnEnter = true }) {
+    if (!input || input._cmdPaletteAttached) return;
+    input._cmdPaletteAttached = true;
+
+    const anchor = input.closest('.cmd-anchor') || input.parentElement;
+    const popup = document.createElement('div');
+    popup.className = 'cmd-popup';
+    popup.id = `cmd-popup-${input.id}`;
+    popup.setAttribute('role', 'listbox');
+    popup.setAttribute('aria-label', 'Slash commands');
+    // The task box sits at the bottom of its panel; everything else has room
+    // above and would otherwise cover the message it is replying to.
+    if (input.id === 'ctrl-payload') popup.classList.add('below');
+    anchor.appendChild(popup);
+
+    input.setAttribute('role', 'combobox');
+    input.setAttribute('aria-expanded', 'false');
+    input.setAttribute('aria-controls', popup.id);
+    input.setAttribute('aria-autocomplete', 'list');
+
+    let items = [];
+    let active = -1;
+    let open = false;
+
+    function close() {
+        if (!open) return;
+        open = false; items = []; active = -1;
+        popup.classList.remove('show');
+        popup.innerHTML = '';
+        input.setAttribute('aria-expanded', 'false');
+        input.removeAttribute('aria-activedescendant');
+    }
+
+    function render() {
+        popup.innerHTML = items.map((it, i) => {
+            const id = `${popup.id}-opt-${i}`;
+            return `<div class="cmd-row${i === active ? ' active' : ''}" role="option"`
+                + ` id="${id}" aria-selected="${i === active}" data-i="${i}">`
+                + `<span class="cmd-row-name">${esc(it.label)}</span>`
+                + (it.hint ? `<span class="cmd-row-hint">${esc(it.hint)}</span>` : '')
+                + (it.desc ? `<span class="cmd-row-desc">${esc(it.desc)}</span>` : '')
+                + `</div>`;
+        }).join('') || '<div class="cmd-empty">no matching command</div>';
+        if (!commandCatalogHermes && items.length) {
+            popup.innerHTML += '<div class="cmd-note">Hermes registry unavailable —'
+                + ' descriptions reduced</div>';
+        }
+        if (active >= 0) {
+            input.setAttribute('aria-activedescendant', `${popup.id}-opt-${active}`);
+            const el = popup.querySelector('.cmd-row.active');
+            if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+        } else {
+            input.removeAttribute('aria-activedescendant');
+        }
+    }
+
+    function refresh() {
+        const result = computeCommandSuggestions(input.value, scope);
+        // null  => not command-shaped at all; the popup has no business here.
+        // items:[] => a command name is being typed but nothing matches. Keep the
+        // popup open showing the empty state: telling the operator "/modle" is
+        // not a command now beats letting them press Enter and get a 400 back.
+        if (!result) { close(); return; }
+        items = result.items;
+        // Preselect the first row so Enter and Tab always have a target; with no
+        // rows, active stays -1 and Enter falls through to submit.
+        active = items.length ? 0 : -1;
+        open = true;
+        popup.classList.add('show');
+        input.setAttribute('aria-expanded', 'true');
+        render();
+    }
+
+    function accept() {
+        if (!open || active < 0 || !items[active]) return false;
+        const chosen = items[active];
+        // Trailing space so the next token (an argument) can be typed straight
+        // away, and so a name completion immediately offers its subcommands.
+        input.value = chosen.value + ' ';
+        close();
+        // Re-run: a completed name may itself have argument suggestions.
+        refresh();
+        if (input.id === 'master-input' && typeof autoGrowMaster === 'function') {
+            autoGrowMaster(input);
+        }
+        return true;
+    }
+
+    input.addEventListener('input', refresh);
+
+    input.addEventListener('keydown', e => {
+        if (open) {
+            // Arrow keys are no-ops when the popup is only showing the empty
+            // state — modulo against a zero-length list would yield NaN.
+            if (e.key === 'ArrowDown' && items.length) {
+                e.preventDefault(); active = (active + 1) % items.length; render(); return;
+            }
+            if (e.key === 'ArrowUp' && items.length) {
+                e.preventDefault();
+                active = (active - 1 + items.length) % items.length; render(); return;
+            }
+            if (e.key === 'Tab' && !e.shiftKey) {
+                if (accept()) { e.preventDefault(); return; }
+            }
+            if (e.key === 'Enter' && !e.shiftKey) {
+                // Accept the highlighted row instead of submitting a partial
+                // command. A second Enter sends it.
+                if (accept()) { e.preventDefault(); return; }
+            }
+            if (e.key === 'Escape') {
+                // Swallow it: the document-level Escape handler closes modals and
+                // the inbox panel, so letting this bubble would shut the whole
+                // respond modal instead of just the popup.
+                e.preventDefault(); e.stopPropagation(); close(); return;
+            }
+        }
+        if (e.key === 'Enter' && !e.shiftKey && submitOnEnter) {
+            e.preventDefault();
+            close();
+            if (typeof onSubmit === 'function') onSubmit();
+        }
+    });
+
+    // mousedown, not click: click fires after blur, by which point the popup is
+    // already gone.
+    popup.addEventListener('mousedown', e => {
+        const row = e.target.closest('.cmd-row');
+        if (!row) return;
+        e.preventDefault();          // keep focus in the input
+        active = parseInt(row.dataset.i, 10);
+        accept();
+        input.focus();
+    });
+
+    input.addEventListener('blur', () => setTimeout(close, 120));
+}
+
+/* Shared handling for a dispatched command's HTTP response. Returns true when
+   the response was a command, so callers skip their normal success path. */
+function handleCommandResponse(data, { onText } = {}) {
+    if (!data || data.command !== true) return false;
+    const text = data.message || '';
+    if (typeof onText === 'function') {
+        onText(text);
+    } else {
+        // showToast inserts `body` RAW (it escapes only the title), so this must
+        // be pre-rendered — mdToHtml escapes everything before applying markdown,
+        // which both formats the output and closes the injection hole. Command
+        // text is server-authored but can echo operator input (unknown-command
+        // names) and Hermes-supplied descriptions.
+        const el = showToast({
+            title: data.ok ? 'Command' : 'Command failed',
+            body: `<div class="cmd-out">${mdToHtml(text)}</div>`,
+            actions: [{ label: 'Dismiss', onClick: () => {} }],
+        });
+        // Toasts here have no auto-dismiss. Successful output is transient, so
+        // clear it; leave failures up until acknowledged.
+        if (el && data.ok) setTimeout(() => el.remove(), 12000);
+    }
+    logEvent(data.ok ? 'system' : 'error', text.split('\n')[0].slice(0, 160));
+    return true;
+}
+
 /* ===== INIT ===== */
 document.addEventListener('DOMContentLoaded', () => {
     hydrateIcons();
@@ -3732,6 +4076,22 @@ document.addEventListener('DOMContentLoaded', () => {
     loadModels();
     checkSetup();
     checkForUpdate();
+    // Slash commands: fetch the catalog once, then attach the same palette to
+    // every composer a human uses to talk to an agent.
+    loadCommandCatalog();
+    attachCommandPalette(document.getElementById('ctrl-payload'), {
+        scope: 'agent', onSubmit: sendTask,
+    });
+    attachCommandPalette(document.getElementById('master-input'), {
+        scope: 'architect', onSubmit: sendMasterMsg,
+    });
+    attachCommandPalette(document.getElementById('respond-text'), {
+        // submitOnEnter stays false: this textarea is sized for multi-line
+        // answers (an operator may paste several lines), and it has never
+        // submitted on Enter. The palette still accepts a highlighted
+        // suggestion with Enter while the popup is open.
+        scope: 'agent', submitOnEnter: false,
+    });
     // Dismiss modals by clicking the backdrop or pressing Escape; trap Tab
     // inside the open dialog so keyboard focus can't escape behind the backdrop.
     document.querySelectorAll('.modal-bg').forEach(bg => {

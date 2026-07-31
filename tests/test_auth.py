@@ -106,6 +106,21 @@ def test_enabled_openapi_guarded(client, auth_on):
     assert client.get("/openapi.json").status_code == 401
 
 
+def test_enabled_commands_catalog_guarded(client, auth_on):
+    # The slash-command catalog describes a private control plane (which agents
+    # can be paused, stopped, reconfigured), so it must stay behind the key —
+    # it is deliberately NOT on AUTH_EXEMPT_PATHS.
+    assert client.get("/commands").status_code == 401
+    r = client.get("/commands", headers={"X-API-Key": KEY})
+    assert r.status_code == 200
+    assert r.json()["commands"]
+
+
+def test_disabled_commands_catalog_open(client, auth_off):
+    # Local no-auth use is unchanged.
+    assert client.get("/commands").status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Auth ENABLED — WebSocket first-message auth
 # ---------------------------------------------------------------------------

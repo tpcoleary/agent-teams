@@ -385,6 +385,104 @@ async def browser_stream_endpoint(ws: WebSocket, team_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Slash commands (human operators only)
+#
+# Dispatch happens HERE, at the HTTP boundary, and never inside
+# AgentDaemon.ingest_task: send_peer_message routes through ingest_task too, so
+# hooking there would let agents fire control commands at each other. The
+# from_agent gate below is that security boundary.
+#
+# Intercepting before enqueue also sidesteps the queue's dedup (queue.py:57-85),
+# which collapses a byte-identical pending payload from the same sender — running
+# /usage twice in a row would otherwise execute once.
+# ---------------------------------------------------------------------------
+_HUMAN_SENDERS = frozenset({"human", "human_operator"})
+
+
+def _apply_agent_config_patch(agent_name: str, fields: Dict[str, Any]) -> None:
+    """Patch an agent's stored config and hot-apply it.
+
+    Shared by PATCH /agent/{name}/config and the /model command so both
+    normalize identically. Deliberately routed here rather than calling
+    AIAgent.switch_model, which rebuilds provider clients and is unsafe while the
+    executor thread is inside run_conversation; _update_daemon_cfg instead nulls
+    the cached AIAgent so the change lands on the agent's next turn.
+    """
+    cfg = load_agents_config()
+    a = cfg["agents"].get(agent_name)
+    if a is None:
+        raise ValueError(f"agent '{agent_name}' not found")
+    updated = _apply_config_fields(a, fields)
+    save_agent_config(agent_name, updated)
+    _update_daemon_cfg(agent_name, updated)
+
+    from teams_server.websocket import _broadcast
+
+    _broadcast("agent_config_updated", {
+        "agent_name": agent_name,
+        "timestamp": __import__("time").time(),
+    })
+
+
+def _command_ctx(scope: str, agent_name: str = "", daemon=None):
+    """Build a CommandContext with this server's dependencies injected."""
+    from teams_server.budget import budget_tracker
+    from teams_server.commands import CommandContext
+
+    return CommandContext(
+        scope=scope,
+        agent_name=agent_name,
+        daemon=daemon,
+        apply_config=_apply_agent_config_patch,
+        budget=budget_tracker,
+    )
+
+
+async def _try_command(text: str, *, scope: str, agent_name: str = "", daemon=None,
+                       from_agent: str = "human_operator"):
+    """Dispatch ``text`` if it is a slash command from a human.
+
+    Returns the CommandResult, or None when the caller should treat the text as
+    ordinary content and continue with its normal path.
+    """
+    if from_agent not in _HUMAN_SENDERS:
+        return None
+    from teams_server import commands as _cmds
+
+    if not _cmds.looks_like_slash_command(text):
+        return None
+    result = await _cmds.dispatch(text, _command_ctx(scope, agent_name, daemon))
+    return result if result.handled else None
+
+
+def _command_response(result) -> JSONResponse:
+    """Uniform HTTP shape for a dispatched command."""
+    return JSONResponse(
+        {
+            "status": "command",
+            "ok": result.ok,
+            "command": True,
+            "message": result.text,
+            "forwarded": result.forwarded,
+        },
+        status_code=200 if result.ok else 400,
+    )
+
+
+@app.get("/commands")
+async def list_commands(request: Request):
+    """Catalog for the dashboard's slash-command autocomplete.
+
+    Guarded like everything else — AUTH_EXEMPT_PATHS is an allow-list and this is
+    not on it. It describes a private control plane, so it stays behind the key.
+    """
+    from teams_server.commands import catalog_payload
+
+    scope = request.query_params.get("scope", "both")
+    return JSONResponse(catalog_payload(scope))
+
+
+# ---------------------------------------------------------------------------
 # Core Agent Routes
 # ---------------------------------------------------------------------------
 @app.post("/agent/{agent_name}/task")
@@ -397,6 +495,14 @@ async def agent_ingest(agent_name: str, request: Request):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
+
+    # Slash command? Handle and return without enqueueing — a command must never
+    # become an LLM turn, and must never be silently swallowed either.
+    cmd = await _try_command(payload, scope="agent", agent_name=agent_name,
+                             daemon=daemon, from_agent=from_agent)
+    if cmd is not None:
+        return _command_response(cmd)
+
     task_id = daemon.ingest_task(from_agent, payload)
     resp = {"task_id": task_id, "status": "queued"}
     # Optional time-boxed directive: until it expires, the agent's idle
@@ -587,6 +693,17 @@ async def human_response(agent_name: str, request: Request):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
+
+    # Slash command? Intercept HERE, not downstream: _finalize_human_answer wraps
+    # the human's text in an emoji-prefixed resume template before enqueueing it,
+    # so by the time it reaches ingest_task the leading "/" is no longer there.
+    # Dispatched ahead of the pending-question lookup so a command still works
+    # when the agent has no question outstanding.
+    cmd = await _try_command(response_text, scope="agent", agent_name=agent_name,
+                             daemon=daemon, from_agent="human_operator")
+    if cmd is not None:
+        return _command_response(cmd)
+
     qid = _resolve_pending_qid(agent_name, daemon)
     if not qid:
         return JSONResponse(
@@ -1423,6 +1540,19 @@ async def post_agent_cron(agent_name: str, request: Request):
     cfg = load_agents_config()
     if agent_name not in cfg["agents"]:
         return JSONResponse({"error": "agent not found"}, status_code=404)
+
+    # A cron instruction is a PROMPT delivered on a schedule, not a live command:
+    # nothing dispatches it, so a "/stop" here would be handed to the model as
+    # text every time it fires. Reject rather than silently storing a footgun.
+    from teams_server.commands import looks_like_slash_command
+
+    if looks_like_slash_command(body.get("instruction", "")):
+        return JSONResponse(
+            {"error": "A scheduled instruction cannot be a slash command — it would "
+                      "be sent to the agent as literal text on every run. Describe "
+                      "the work in plain language instead."},
+            status_code=400,
+        )
     try:
         mr = body.get("max_runs")
         entry = add_agent_cron(
@@ -1577,6 +1707,23 @@ async def master_chat(request: Request):
     message = (body.get("message") or "").strip()
     if not message:
         return JSONResponse({"error": "message is required"}, status_code=400)
+
+    # Slash command? The Architect has its own runtime and never touches the task
+    # queue, so this is a separate intercept from the agent path. Echo the result
+    # over the same 'master_message' event its normal replies use, so the
+    # transcript stays coherent instead of the answer appearing only in the HTTP
+    # response.
+    cmd = await _try_command(message, scope="architect", from_agent="human_operator")
+    if cmd is not None:
+        from teams_server.websocket import _broadcast
+
+        _broadcast("master_message", {
+            "role": "assistant",
+            "content": cmd.text,
+            "timestamp": __import__("time").time(),
+        })
+        return _command_response(cmd)
+
     m = get_master()
     if not m.is_configured():
         return JSONResponse({"error": "no model configured — set one in Model settings first"}, status_code=409)
@@ -1984,6 +2131,13 @@ async def respond_to_human_question(agent_name: str, request: Request):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    # Slash command? Same reasoning as /agent/{name}/human_response: the text is
+    # template-wrapped downstream, so the "/" is only visible here.
+    cmd = await _try_command(response_text, scope="agent", agent_name=agent_name,
+                             daemon=daemon, from_agent="human_operator")
+    if cmd is not None:
+        return _command_response(cmd)
 
     # Resolve the target question. An explicit question_id is honored ONLY if it is
     # genuinely a pending question for THIS agent — never blindly delivered as the

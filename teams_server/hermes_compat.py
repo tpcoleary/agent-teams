@@ -140,6 +140,76 @@ def _probe_aiagent_callbacks():
         return False, f"AIAgent signature unavailable: {e}"
 
 
+def _probe_slash_command_registry():
+    # commands.py builds the dashboard's slash-command catalog by decorating its
+    # own _SPEC with Hermes' registry metadata (descriptions, aliases, arg hints)
+    # and resolves aliases via resolve_command(). Losing the registry degrades
+    # wording and alias breadth but never behavior (dispatch keys off _SPEC), so
+    # this is non-critical — but a silent upstream rename would still ship stale
+    # copy to the UI, so make it loud.
+    try:
+        from hermes_cli.commands import COMMAND_REGISTRY, resolve_command
+    except Exception as e:
+        return False, f"hermes_cli.commands unavailable: {e}"
+    if not COMMAND_REGISTRY:
+        return False, "COMMAND_REGISTRY is empty"
+
+    # Probe ONLY the attributes commands.py actually reads. cli_only /
+    # gateway_only are deliberately excluded: those flags describe which Hermes
+    # front-end a command suits, and _SPEC decides our membership instead
+    # (/cron is cli_only yet wanted), so alarming on them would be a false
+    # positive.
+    needed = ("name", "description", "aliases", "args_hint", "subcommands", "category")
+    sample = COMMAND_REGISTRY[0]
+    missing = [f for f in needed if not hasattr(sample, f)]
+    if missing:
+        return False, f"CommandDef no longer exposes {missing}"
+
+    # Same idea as the DISABLED_TOOLSETS check below: every upstream name we
+    # inherit metadata for must still exist, or the catalog silently falls back
+    # to local copy.
+    try:
+        from teams_server.commands import _SPEC
+    except Exception as e:
+        return False, f"teams_server.commands unimportable: {e}"
+    live = {getattr(c, "name", "") for c in COMMAND_REGISTRY}
+    inherited = [n for n, s in _SPEC.items() if not s.get("native")]
+    gone = [n for n in inherited if n not in live]
+    if gone:
+        return False, f"Hermes no longer defines {gone} (catalog falls back to local copy)"
+
+    # Probe resolve_command by CALLING it, not by demanding a specific alias
+    # resolve. commands.py uses it only as a last-resort fallback in resolve(),
+    # and aliases for commands we implement already come from CommandDef.aliases
+    # at catalog-build time. An earlier version of this probe asserted that
+    # resolve_command("compact") was non-None -- but /compact maps to /compress,
+    # which Teams deliberately does not implement, so that lookup can never
+    # succeed in our catalog and the assertion only produced false drift against
+    # older Hermes checkouts.
+    try:
+        resolve_command("help")
+    except Exception as e:
+        return False, f"resolve_command() raised: {e}"
+
+    # Verify the aliases we actually surface are still declared upstream.
+    alias_src = {
+        n: tuple(getattr(_hermes_entry_for(COMMAND_REGISTRY, n), "aliases", ()) or ())
+        for n in inherited
+    }
+    n_aliases = sum(len(v) for v in alias_src.values())
+    return True, (
+        f"{len(COMMAND_REGISTRY)} commands; {len(inherited)} inherited; "
+        f"{n_aliases} alias(es) surfaced"
+    )
+
+
+def _hermes_entry_for(registry, name: str):
+    for c in registry:
+        if getattr(c, "name", None) == name:
+            return c
+    return None
+
+
 def _probe_disabled_toolsets():
     # DISABLED_TOOLSETS is a hand-maintained denylist of Hermes toolset NAMES.
     # Validate every entry still exists in the live registry — a renamed toolset
@@ -187,6 +257,7 @@ _PROBES: List[tuple] = [
     ("web_search_registry", _probe_web_registry, False),
     ("provider_model_seed", _probe_provider_model_seed, False),
     ("aiagent_callbacks", _probe_aiagent_callbacks, False),
+    ("slash_command_registry", _probe_slash_command_registry, False),
     ("disabled_toolsets", _probe_disabled_toolsets, False),
 ]
 

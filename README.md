@@ -368,6 +368,59 @@ open http://127.0.0.1:8000  # open the dashboard
 <br/>
 
 
+## Slash commands
+
+Type `/` in any dashboard composer — the agent message box, the Architect chat, or
+an inbox reply — to get an autocompleting command palette. Commands run against
+the **orchestration layer** and never become an LLM turn, so checking usage or
+interrupting a stuck agent costs nothing.
+
+| Command | Where | What it does | Alias |
+| ------- | ----- | ------------ | ----- |
+| `/steer <prompt>` | agent | Inject a message after the agent's next tool call, without interrupting it | |
+| `/stop` | agent | Interrupt the in-flight turn and drain pending tasks | |
+| `/pause` | agent | Pause the agent — in-flight work is held, not lost | |
+| `/resume` | agent | Resume a paused agent | |
+| `/status` | both | Agent state, queue depth, model, and spend | |
+| `/usage` | both | Token usage and estimated cost for the session | |
+| `/queue` | agent | List the agent's pending tasks | `/q` |
+| `/model [model]` | agent | Show or change the agent's model | |
+| `/goal [show \| clear \| <text> [--hours N]]` | agent | Set a standing directive the agent keeps pushing on while idle | |
+| `/cron` | agent | List the agent's scheduled wake-ups | |
+| `/help` | both | Show the commands available on this surface | |
+
+Autocomplete completes command names, subcommands (`/goal <tab>`), and live
+argument values — `/model <tab>` offers the models your provider actually serves.
+`↑`/`↓` to move, `Tab`/`Enter` to accept, `Esc` to dismiss.
+
+**Command names match [Hermes'](https://github.com/NousResearch/hermes-agent) own
+CLI**, but where the two systems mean different things, **Agent Teams' meaning
+wins** — you're driving a team, not a chat session:
+
+| Command | In Hermes' CLI | In Agent Teams |
+| ------- | -------------- | -------------- |
+| `/stop` | Kills background processes | Interrupts the agent's turn |
+| `/resume` | Resumes a saved session | Un-pauses a paused agent |
+| `/queue` | Queues a prompt for the next turn | Lists pending tasks |
+| `/status` | Session, model, and context info | Agent and team health |
+| `/model` | Switches the live session model | Patches the agent's config (applies next turn) |
+| `/goal` | Hermes' standing-goal subsystem | A time-boxed directive |
+
+Some Hermes commands are intentionally **not** available: `/undo` and `/retry`
+need a transcript store Agent Teams doesn't have, `/title` is meaningless for
+long-lived named agents, and `/compress` would report success without actually
+shrinking an agent's context. A `/`-prefixed line that isn't a real command is
+rejected with a suggestion rather than forwarded to the model, so a typo can't
+quietly burn a turn. Pasted paths (`/Users/you/brief.md`) are treated as ordinary
+text.
+
+> Only humans can run commands. Agents message each other through the same
+> endpoint, so an agent sending `/pause` to a teammate is delivered as plain
+> text — it can't drive another agent's control plane.
+
+<br/>
+
+
 ## FAQ
 
 **How is this different from running multiple Hermes agents in separate terminals?**
