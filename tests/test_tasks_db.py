@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""Unit tests for the central task-tracking store (teams_server/tasks_db.py).
+
+Covers, with no LLM and no Hermes required:
+  1. CREATE / GET      — basic lifecycle, blank-title rejection
+  2. SUBTASKS           — parent linkage, missing-parent rejection, listing
+  3. LIST FILTERS       — team_id / assigned_to / status filters
+  4. EDIT               — partial update of descriptive fields only
+  5. REASSIGN           — assignee change
+  6. PROGRESS           — clamping, pending->in_progress auto-flip
+  7. SET STATUS         — enum validation, blocked_reason, completed_at,
+                         reopening a terminal task
+  8. CASCADE DELETE     — deleting a parent removes its subtasks too
+
+Run:  pytest tests/test_tasks_db.py -v
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from teams_server.tasks_db import TasksDB  # noqa: E402
+
+
+@pytest.fixture()
+def db(tmp_path):
+    return TasksDB(tmp_path / "tasks.db")
+
+
+# ---------------------------------------------------------------------------
+# 1. Create / get
+# ---------------------------------------------------------------------------
+def test_create_and_get(db):
+    task = db.create_task("Write docs", created_by="alice", assigned_to="bob",
+                           description="the readme", team_id="t1", priority=2)
+    assert task["title"] == "Write docs"
+    assert task["status"] == "pending"
+    assert task["progress"] == 0
+    assert task["priority"] == 2
+    assert task["assigned_to"] == "bob"
+    assert task["created_by"] == "alice"
+    assert task["parent_task_id"] is None
+
+    fetched = db.get_task(task["id"])
+    assert fetched == task
+
+
+def test_create_blank_title_rejected(db):
+    with pytest.raises(ValueError):
+        db.create_task("   ", created_by="alice", assigned_to="bob")
+
+
+def test_get_missing_task_returns_none(db):
+    assert db.get_task("nonexistent") is None
+
+
+def test_priority_clamped_to_range(db):
+    lo = db.create_task("a", created_by="alice", assigned_to="bob", priority=-5)
+    hi = db.create_task("b", created_by="alice", assigned_to="bob", priority=99)
+    bad = db.create_task("c", created_by="alice", assigned_to="bob", priority="oops")
+    assert lo["priority"] == 0
+    assert hi["priority"] == 3
+    assert bad["priority"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 2. Subtasks
+# ---------------------------------------------------------------------------
+def test_create_subtask_and_list(db):
+    parent = db.create_task("Ship feature", created_by="alice", assigned_to="alice")
+    sub1 = db.create_task("Write tests", created_by="alice", assigned_to="bob",
+                           parent_task_id=parent["id"])
+    sub2 = db.create_task("Update docs", created_by="alice", assigned_to="bob",
+                           parent_task_id=parent["id"])
+
+    subs = db.get_subtasks(parent["id"])
+    assert {s["id"] for s in subs} == {sub1["id"], sub2["id"]}
+    assert all(s["parent_task_id"] == parent["id"] for s in subs)
+
+
+def test_create_subtask_missing_parent_rejected(db):
+    with pytest.raises(ValueError):
+        db.create_task("orphan", created_by="alice", assigned_to="bob",
+                        parent_task_id="does-not-exist")
+
+
+def test_get_subtasks_empty_for_leaf_task(db):
+    task = db.create_task("leaf", created_by="alice", assigned_to="bob")
+    assert db.get_subtasks(task["id"]) == []
+
+
+# ---------------------------------------------------------------------------
+# 3. List filters
+# ---------------------------------------------------------------------------
+def test_list_tasks_filters(db):
+    db.create_task("t1", created_by="alice", assigned_to="bob", team_id="teamA")
+    t2 = db.create_task("t2", created_by="alice", assigned_to="carol", team_id="teamA")
+    db.create_task("t3", created_by="alice", assigned_to="bob", team_id="teamB")
+    db.set_status(t2["id"], "done")
+
+    assert len(db.list_tasks(team_id="teamA")) == 2
+    assert len(db.list_tasks(assigned_to="bob")) == 2
+    assert len(db.list_tasks(team_id="teamA", assigned_to="bob")) == 1
+    assert len(db.list_tasks(status="done")) == 1
+    assert len(db.list_tasks()) == 3
+
+
+def test_list_tasks_respects_limit_and_order(db):
+    for i in range(5):
+        db.create_task(f"task-{i}", created_by="alice", assigned_to="bob")
+    limited = db.list_tasks(limit=2)
+    assert len(limited) == 2
+    # newest first
+    assert limited[0]["title"] == "task-4"
+
+
+# ---------------------------------------------------------------------------
+# 4. Edit
+# ---------------------------------------------------------------------------
+def test_edit_task_partial_update(db):
+    task = db.create_task("Original", created_by="alice", assigned_to="bob",
+                           description="d1", priority=1)
+    updated = db.edit_task(task["id"], title="New title")
+    assert updated["title"] == "New title"
+    assert updated["description"] == "d1"  # untouched
+    assert updated["priority"] == 1  # untouched
+
+
+def test_edit_task_does_not_touch_status_progress_assignee(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    db.update_progress(task["id"], 40)
+    updated = db.edit_task(task["id"], description="new desc")
+    assert updated["progress"] == 40
+    assert updated["status"] == "in_progress"
+    assert updated["assigned_to"] == "bob"
+
+
+def test_edit_task_blank_title_rejected(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    with pytest.raises(ValueError):
+        db.edit_task(task["id"], title="   ")
+
+
+def test_edit_missing_task_returns_none(db):
+    assert db.edit_task("nonexistent", title="x") is None
+
+
+def test_edit_task_no_fields_returns_existing_unchanged(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    result = db.edit_task(task["id"])
+    assert result == task
+
+
+# ---------------------------------------------------------------------------
+# 5. Reassign
+# ---------------------------------------------------------------------------
+def test_reassign_task(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    updated = db.reassign_task(task["id"], "carol")
+    assert updated["assigned_to"] == "carol"
+
+
+def test_reassign_missing_task_returns_none(db):
+    assert db.reassign_task("nonexistent", "carol") is None
+
+
+# ---------------------------------------------------------------------------
+# 6. Progress
+# ---------------------------------------------------------------------------
+def test_update_progress_clamps_range(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    over = db.update_progress(task["id"], 500)
+    assert over["progress"] == 100
+    under = db.update_progress(task["id"], -20)
+    assert under["progress"] == 0
+
+
+def test_update_progress_flips_pending_to_in_progress(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    assert task["status"] == "pending"
+    updated = db.update_progress(task["id"], 10)
+    assert updated["status"] == "in_progress"
+
+
+def test_update_progress_does_not_reflip_other_statuses(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    db.set_status(task["id"], "blocked", blocked_reason="waiting")
+    updated = db.update_progress(task["id"], 50)
+    assert updated["status"] == "blocked"
+
+
+def test_update_progress_rejects_non_integer(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    with pytest.raises(ValueError):
+        db.update_progress(task["id"], "not-a-number")
+
+
+def test_update_progress_missing_task_returns_none(db):
+    assert db.update_progress("nonexistent", 50) is None
+
+
+# ---------------------------------------------------------------------------
+# 7. Set status
+# ---------------------------------------------------------------------------
+def test_set_status_invalid_rejected(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    with pytest.raises(ValueError):
+        db.set_status(task["id"], "not-a-real-status")
+
+
+def test_set_status_done_sets_progress_and_completed_at(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    updated = db.set_status(task["id"], "done")
+    assert updated["status"] == "done"
+    assert updated["progress"] == 100
+    assert updated["completed_at"] is not None
+
+
+def test_set_status_failed_sets_completed_at_not_progress(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    updated = db.set_status(task["id"], "failed")
+    assert updated["status"] == "failed"
+    assert updated["completed_at"] is not None
+    assert updated["progress"] == 0  # failed doesn't force 100
+
+
+def test_set_status_blocked_sets_reason_and_clears_on_unblock(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    blocked = db.set_status(task["id"], "blocked", blocked_reason="need creds")
+    assert blocked["status"] == "blocked"
+    assert blocked["blocked_reason"] == "need creds"
+
+    resumed = db.set_status(task["id"], "in_progress")
+    assert resumed["blocked_reason"] is None
+
+
+def test_reopening_terminal_task_clears_completed_at(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    db.set_status(task["id"], "done")
+    reopened = db.set_status(task["id"], "pending")
+    assert reopened["completed_at"] is None
+
+
+def test_set_status_missing_task_returns_none(db):
+    assert db.set_status("nonexistent", "done") is None
+
+
+# ---------------------------------------------------------------------------
+# 8. Cascade delete
+# ---------------------------------------------------------------------------
+def test_delete_task_cascades_to_subtasks(db):
+    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
+    sub = db.create_task("sub", created_by="alice", assigned_to="bob",
+                          parent_task_id=parent["id"])
+
+    deleted_ids = db.delete_task(parent["id"])
+    assert deleted_ids == [sub["id"]]
+    assert db.get_task(parent["id"]) is None
+    assert db.get_task(sub["id"]) is None
+
+
+def test_delete_leaf_task_returns_empty_list(db):
+    task = db.create_task("t", created_by="alice", assigned_to="bob")
+    deleted_ids = db.delete_task(task["id"])
+    assert deleted_ids == []
+
+
+def test_delete_missing_task_returns_none(db):
+    assert db.delete_task("nonexistent") is None
+
+
+if __name__ == "__main__":
+    import subprocess
+    raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-v"]))

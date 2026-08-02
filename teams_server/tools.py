@@ -8,6 +8,7 @@ import uuid
 from typing import Any, Dict, List
 
 from teams_server.monitoring import monitor_db
+from teams_server.task_tools import TASK_TOOL_SCHEMAS
 from teams_server.websocket import _broadcast
 
 log = logging.getLogger("teams.tools")
@@ -712,7 +713,7 @@ _TEAMS_TOOL_SCHEMAS = (
     _CANCEL_WAKEUP_TOOL_SCHEMA,
     _PAUSE_AGENT_TOOL_SCHEMA,
     _RESUME_AGENT_TOOL_SCHEMA,
-)
+) + TASK_TOOL_SCHEMAS
 
 
 def list_teams_tools():
@@ -1642,6 +1643,10 @@ def _register_custom_tools():
                 description="Lift a pause on an agent once it's safe to continue.",
             )
             log.info("[resume_agent] Registered")
+
+        from teams_server.task_tools import register_task_tools
+
+        register_task_tools(registry)
 
         # Per-team credentials registry — secrets live OUTSIDE the prompt
         # stream, each under a site key with an explicit purpose, so agents

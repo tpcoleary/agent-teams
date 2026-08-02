@@ -191,6 +191,24 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .queue-bar-track { flex: 1; height: 5px; background: var(--bg-hover); border-radius: 0; overflow: hidden; }
 .queue-bar-fill { height: 100%; border-radius: 0; background: var(--accent); transition: width 0.5s cubic-bezier(.4,0,.2,1); }
 .queue-bar-count { width: 22px; text-align: right; font-size: 12px; font-weight: 600; font-family: var(--font-mono); }
+/* Tasks page (full-viewport, toggled in place of #stage/#left-col/.ov-right/#event-log) */
+#tasks-page { display: none; position: fixed; top: var(--topbar-h); left: 0; right: 0; bottom: 0; overflow: auto; background: var(--bg); padding: 16px; z-index: 40; }
+#tasks-page.open { display: block; }
+.tasks-board { display: flex; gap: 14px; align-items: flex-start; height: 100%; }
+.tasks-col { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); min-width: 280px; max-width: 320px; flex-shrink: 0; display: flex; flex-direction: column; max-height: 100%; }
+.tasks-col-header { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+.tasks-col-body { padding: 10px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.tasks-group-label { font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 6px 0 2px; }
+.task-card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 9px 10px; cursor: pointer; transition: border-color 0.15s; }
+.task-card:hover { border-color: var(--border-strong); }
+.task-card.sub { margin-left: 14px; border-left: 2px solid var(--border-strong); }
+.task-card-title { font-size: 12px; font-weight: 500; color: var(--text); word-break: break-word; }
+.task-card-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.task-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.task-priority { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); color: var(--text-muted); }
+.task-card .queue-bar-track { height: 4px; margin-top: 6px; }
+.task-card-blocked-reason { font-size: 10.5px; color: var(--danger); margin-top: 5px; }
+.tasks-empty-col { font-size: 11px; color: var(--text-muted); text-align: center; padding: 18px 0; }
 /* Workspace file browser (left-column middle panel) */
 .ws-list { display: flex; flex-direction: column; gap: 1px; }
 .ws-item { display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: var(--r-sm); cursor: pointer; font-size: 11.5px; color: var(--text-secondary); font-family: var(--font-mono); }
@@ -674,6 +692,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     </div>
     <button id="architect-btn" onclick="toggleMaster()" title="Chat with the Architect — it designs and builds agent teams for you"><span data-icon="compass" data-icon-size="14"></span> <span class="tb-label">Architect</span></button>
     <div class="topbar-right">
+        <button id="tasks-btn" class="btn btn-sm btn-secondary" onclick="toggleTasksPage()" aria-label="Open tasks board" title="See what every agent is working on"><span data-icon="check-square" data-icon-size="13"></span> <span class="tb-label">Tasks</span></button>
         <button id="inbox-btn" class="btn btn-sm btn-secondary" onclick="toggleInbox()" aria-label="Open inbox" style="position:relative;">
             <span data-icon="mail" data-icon-size="13"></span> <span class="tb-label">Inbox</span>
             <span id="inbox-badge" role="status" aria-label="Pending inbox items" style="
@@ -790,6 +809,47 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 <div class="ov ov-log event-log-container collapsed" id="event-log">
     <div class="panel-header" onclick="toggleLog()" style="cursor:pointer"><span><span data-icon="terminal" data-icon-size="12"></span> Event Log</span><button class="bare ov-collapse" id="log-toggle" onclick="event.stopPropagation();toggleLog()" aria-label="Toggle event log" aria-expanded="false"><span data-icon="chevron-down" data-icon-size="12"></span></button></div>
     <div class="event-log-body" id="event-log-body" role="log"></div>
+</div>
+
+<!-- Tasks page (full-viewport board, toggled via #tasks-btn) -->
+<div id="tasks-page">
+    <div class="panel-header" style="margin-bottom:12px">
+        <span>Tasks</span>
+        <div class="ph-actions">
+            <span style="font-size:10px;color:var(--text-muted);text-transform:none;letter-spacing:0" id="tasks-page-count"></span>
+            <button class="btn btn-sm btn-secondary" onclick="loadAllTasks()" title="Refresh"><span data-icon="history" data-icon-size="12"></span></button>
+        </div>
+    </div>
+    <div class="tasks-board" id="tasks-board"></div>
+</div>
+
+<!-- Task Detail/Edit Modal (dashboard-side edit for the Tasks page) -->
+<div class="modal-bg" id="modal-task-detail">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-task-detail">
+        <div class="modal-header" id="mh-task-detail">Edit Task</div>
+        <div class="modal-body">
+            <input type="hidden" id="td-task-id">
+            <div class="control-group"><label class="control-label" for="td-title">Title</label><input class="control-input" id="td-title"></div>
+            <div class="control-group"><label class="control-label" for="td-description">Description</label><textarea class="control-textarea" id="td-description"></textarea></div>
+            <div style="display:flex;gap:10px">
+                <div class="control-group" style="flex:1"><label class="control-label" for="td-status">Status</label><select class="control-select" id="td-status"></select></div>
+                <div class="control-group" style="flex:1"><label class="control-label" for="td-assigned">Assigned to</label><select class="control-select" id="td-assigned"></select></div>
+            </div>
+            <div class="control-group">
+                <label class="control-label" for="td-progress">Progress</label>
+                <div style="display:flex;gap:8px;align-items:center">
+                    <input type="range" id="td-progress" min="0" max="100" style="flex:1" oninput="document.getElementById('td-progress-val').textContent = this.value + '%'">
+                    <span id="td-progress-val" style="font-size:11px;font-family:var(--font-mono);width:36px">0%</span>
+                </div>
+            </div>
+            <div class="control-group"><label class="control-label" for="td-blocked-reason">Blocked reason</label><textarea class="control-textarea" id="td-blocked-reason" placeholder="Only used when status = blocked"></textarea></div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" style="color:var(--danger)" onclick="doDeleteTaskDetail()">Delete</button>
+            <button class="btn btn-secondary" onclick="hideModal('modal-task-detail')">Cancel</button>
+            <button class="btn" onclick="doSaveTaskDetail()">Save</button>
+        </div>
+    </div>
 </div>
 
 <!-- Add Agent Modal -->
@@ -1498,6 +1558,44 @@ function handleWS(msg) {
             break;
         case 'error': logEvent('error', `${payload.agent_name}: ${payload.error?.slice(0, 100)}`); break;
         case 'soul_updated': logEvent('system', `${payload.agent_name} soul updated`); break;
+        case 'task_created':
+            tasksStore.set(payload.id, payload);
+            logEvent('system', `${payload.created_by} created task '${payload.title}' → ${payload.assigned_to}`);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_subtask_created':
+            tasksStore.set(payload.id, payload);
+            logEvent('system', `${payload.created_by} created subtask '${payload.title}' → ${payload.assigned_to}`);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_reassigned':
+            tasksStore.set(payload.id, payload);
+            logEvent('system', `Task '${payload.title}' reassigned ${payload.previous_assignee} → ${payload.assigned_to}`);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_updated':
+            tasksStore.set(payload.id, payload);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_progress':
+            tasksStore.set(payload.id, payload);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_completed':
+            tasksStore.set(payload.id, payload);
+            logEvent('system', `Task '${payload.title}' completed`);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_blocked':
+            tasksStore.set(payload.id, payload);
+            logEvent('system', `Task '${payload.title}' blocked: ${payload.blocked_reason || ''}`);
+            if (tasksPageOpen) renderTasksPage();
+            break;
+        case 'task_deleted':
+            tasksStore.delete(payload.task_id);
+            for (const id of (payload.subtask_ids || [])) tasksStore.delete(id);
+            if (tasksPageOpen) renderTasksPage();
+            break;
     }
 }
 
@@ -1882,6 +1980,165 @@ async function showTasks(name) {
     } catch (e) {
         list.innerHTML = `<div style="padding:14px;color:var(--danger,#e5534b);font-size:12px">Could not load tasks: ${esc(e.message)}</div>`;
     }
+}
+
+/* ===== TASKS PAGE (full board — human-meaningful work items, NOT the inbox
+   drill-down above). One column per agent, subtasks nested under their
+   parent, re-rendered from tasksStore on every load + WS update. ===== */
+let tasksStore = new Map();
+let tasksPageOpen = false;
+
+const TASK_STATUS_META = {
+    pending:     { label: 'Pending',     color: '#8E8E96' },
+    in_progress: { label: 'In progress', color: '#F5B544' },
+    blocked:     { label: 'Blocked',     color: '#F2555A' },
+    done:        { label: 'Done',        color: '#3ECF8E' },
+    failed:      { label: 'Failed',      color: '#C9353B' },
+};
+const TASK_STATUS_ORDER = ['in_progress', 'blocked', 'pending', 'done', 'failed'];
+const TASK_PRIORITY_LABEL = { 0: 'low', 1: 'normal', 2: 'high', 3: 'urgent' };
+
+function toggleTasksPage() {
+    tasksPageOpen = !tasksPageOpen;
+    document.getElementById('tasks-page').classList.toggle('open', tasksPageOpen);
+    document.getElementById('stage').style.display = tasksPageOpen ? 'none' : '';
+    document.getElementById('left-col').style.display = tasksPageOpen ? 'none' : '';
+    document.getElementById('ov-right').style.display = tasksPageOpen ? 'none' : '';
+    document.getElementById('event-log').style.display = tasksPageOpen ? 'none' : '';
+    if (tasksPageOpen) loadAllTasks();
+}
+
+async function loadAllTasks() {
+    const board = document.getElementById('tasks-board');
+    board.innerHTML = '<div class="tasks-empty-col">Loading…</div>';
+    try {
+        const res = await fetch(`${API_URL}/tasks?limit=1000`);
+        const d = await res.json();
+        tasksStore = new Map((d.tasks || []).map(t => [t.id, t]));
+        renderTasksPage();
+    } catch (e) {
+        board.innerHTML = `<div class="tasks-empty-col">Could not load tasks: ${esc(e.message)}</div>`;
+    }
+}
+
+function taskCardHTML(t, isSub) {
+    const s = TASK_STATUS_META[t.status] || { label: t.status || '?', color: '#8E8E96' };
+    const prio = TASK_PRIORITY_LABEL[t.priority] ?? 'normal';
+    const when = t.created_at ? new Date(t.created_at * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+    const blockedNote = t.status === 'blocked' && t.blocked_reason
+        ? `<div class="task-card-blocked-reason">⚠ ${esc(t.blocked_reason)}</div>` : '';
+    const progressBar = (t.status === 'in_progress' || t.status === 'pending')
+        ? `<div class="queue-bar-track"><div class="queue-bar-fill" style="width:${Math.max(0, Math.min(100, t.progress || 0))}%;background:${s.color}"></div></div>` : '';
+    return `<div class="task-card${isSub ? ' sub' : ''}" onclick="showTaskDetail('${jsAttr(t.id)}')" title="Click to edit">
+        <div class="task-card-title">${esc(t.title)}</div>
+        <div class="task-card-meta">
+            <span class="task-status-dot" style="background:${s.color}"></span>
+            <span style="font-size:10px;color:var(--text-muted)">${esc(s.label)}</span>
+            <span class="task-priority">${esc(prio)}</span>
+            <span style="font-size:10px;color:var(--text-muted);margin-left:auto">${esc(when)}</span>
+        </div>
+        ${progressBar}
+        ${blockedNote}
+    </div>`;
+}
+
+function renderTasksPage() {
+    const board = document.getElementById('tasks-board');
+    const countEl = document.getElementById('tasks-page-count');
+    const all = Array.from(tasksStore.values());
+    countEl.textContent = all.length ? `${all.length} task(s)` : '';
+    if (!all.length) { board.innerHTML = '<div class="tasks-empty-col">No tasks yet.</div>'; return; }
+
+    const topLevel = all.filter(t => !t.parent_task_id);
+    const subsByParent = new Map();
+    for (const t of all) {
+        if (t.parent_task_id) {
+            if (!subsByParent.has(t.parent_task_id)) subsByParent.set(t.parent_task_id, []);
+            subsByParent.get(t.parent_task_id).push(t);
+        }
+    }
+
+    const agentNames = new Set([...Object.keys(agentData), ...topLevel.map(t => t.assigned_to).filter(Boolean)]);
+    const columns = Array.from(agentNames).sort().map(name => {
+        const mine = topLevel.filter(t => t.assigned_to === name);
+        if (!mine.length && !agentData[name]) return '';
+        let body = '';
+        for (const status of TASK_STATUS_ORDER) {
+            const inGroup = mine.filter(t => t.status === status);
+            if (!inGroup.length) continue;
+            body += `<div class="tasks-group-label">${esc(TASK_STATUS_META[status]?.label || status)} (${inGroup.length})</div>`;
+            for (const t of inGroup) {
+                body += taskCardHTML(t, false);
+                const subs = subsByParent.get(t.id) || [];
+                for (const sub of subs) body += taskCardHTML(sub, true);
+            }
+        }
+        if (!body) body = '<div class="tasks-empty-col">No tasks</div>';
+        return `<div class="tasks-col">
+            <div class="tasks-col-header"><span>${esc(name)}</span><span style="color:var(--text-muted);font-weight:400">${mine.length}</span></div>
+            <div class="tasks-col-body">${body}</div>
+        </div>`;
+    }).filter(Boolean);
+
+    board.innerHTML = columns.length ? columns.join('') : '<div class="tasks-empty-col">No tasks yet.</div>';
+}
+
+async function showTaskDetail(taskId) {
+    const t = tasksStore.get(taskId);
+    if (!t) return;
+    document.getElementById('td-task-id').value = taskId;
+    document.getElementById('td-title').value = t.title || '';
+    document.getElementById('td-description').value = t.description || '';
+    document.getElementById('td-blocked-reason').value = t.blocked_reason || '';
+    document.getElementById('td-progress').value = t.progress || 0;
+    document.getElementById('td-progress-val').textContent = `${t.progress || 0}%`;
+
+    const statusSel = document.getElementById('td-status');
+    statusSel.innerHTML = Object.keys(TASK_STATUS_META)
+        .map(s => `<option value="${s}" ${t.status === s ? 'selected' : ''}>${esc(TASK_STATUS_META[s].label)}</option>`).join('');
+
+    const assignedSel = document.getElementById('td-assigned');
+    const agents = Object.keys(agentData).sort();
+    assignedSel.innerHTML = agents
+        .map(a => `<option value="${escAttr(a)}" ${t.assigned_to === a ? 'selected' : ''}>${esc(a)}</option>`).join('');
+
+    showModal('modal-task-detail');
+}
+
+async function doSaveTaskDetail() {
+    const taskId = document.getElementById('td-task-id').value;
+    const body = {
+        title: document.getElementById('td-title').value.trim(),
+        description: document.getElementById('td-description').value,
+        status: document.getElementById('td-status').value,
+        assigned_to: document.getElementById('td-assigned').value,
+        progress: parseInt(document.getElementById('td-progress').value, 10),
+        blocked_reason: document.getElementById('td-blocked-reason').value,
+    };
+    try {
+        const res = await fetch(`${API_URL}/tasks/${encodeURIComponent(taskId)}`, {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'update failed');
+        tasksStore.set(taskId, d.task);
+        renderTasksPage();
+        hideModal('modal-task-detail');
+    } catch (e) { logEvent('error', `Task update failed: ${e.message}`); }
+}
+
+async function doDeleteTaskDetail() {
+    const taskId = document.getElementById('td-task-id').value;
+    try {
+        const res = await fetch(`${API_URL}/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'delete failed');
+        tasksStore.delete(taskId);
+        for (const [id, task] of tasksStore) if (task.parent_task_id === taskId) tasksStore.delete(id);
+        renderTasksPage();
+        hideModal('modal-task-detail');
+    } catch (e) { logEvent('error', `Task delete failed: ${e.message}`); }
 }
 
 function addMessageToUI(msg) {

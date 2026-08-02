@@ -44,7 +44,7 @@ from teams_server.prompts import SUPERVISOR_SWEEP_PROMPT  # noqa: E402
 # Harness: a minimal stand-in for the daemon + a fake monitor_db
 # ---------------------------------------------------------------------------
 
-class FakeQueue:
+class FakeInbox:
     def __init__(self, pending=0):
         self.pending = pending
 
@@ -90,7 +90,7 @@ def make_supervisor(peers, interval_minutes=None, state="idle", pending=0,
         sup.cfg["supervisor_interval_minutes"] = interval_minutes
     sup.state = state
     sup._stop_requested = False
-    sup.queue = FakeQueue(pending)
+    sup.inbox = FakeInbox(pending)
     sup._sup_watermark = {}
     sup._last_sweep_ts = time.time() - (last_sweep_ago
                                         if last_sweep_ago is not None else 10 ** 6)
@@ -225,7 +225,7 @@ def test_mid_turn_busy_marker(monkeypatch, no_registry):
 
     db = FakeDB({"a": [msg(1, "partial work so far")]})
     monkeypatch.setattr(agent_mod, "monitor_db", db)
-    busy_peer = types.SimpleNamespace(state="busy", queue=FakeQueue(2))
+    busy_peer = types.SimpleNamespace(state="busy", inbox=FakeInbox(2))
     monkeypatch.setattr(agent_mod, "_daemon_registry", {"a": busy_peer}, raising=False)
     sup = make_supervisor(["a"])
     sup._sup_watermark = {"a": 0}

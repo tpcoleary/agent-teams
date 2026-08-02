@@ -62,7 +62,7 @@ from teams_server.prompts import (
 )
 from teams_server.browser_pool import team_browser_manager
 from teams_server.monitoring import monitor_db
-from teams_server.queue import TaskQueue
+from teams_server.inbox import InboxQueue
 from teams_server.tools import (
     _ASK_HUMAN_TOOL_SCHEMA,
     _SEND_PEER_MESSAGE_TOOL_SCHEMA,
@@ -313,6 +313,7 @@ def _inject_teams_tools(agent, *, is_supervisor: bool,
         _SCHEDULE_WAKEUP_TOOL_SCHEMA, _CANCEL_WAKEUP_TOOL_SCHEMA,
         _PAUSE_AGENT_TOOL_SCHEMA, _RESUME_AGENT_TOOL_SCHEMA,
     )
+    from teams_server.task_tools import TASK_TOOL_SCHEMAS
 
     disabled = disabled or set()
     existing = {t.get("function", {}).get("name") for t in (agent.tools or [])}
@@ -340,6 +341,8 @@ def _inject_teams_tools(agent, *, is_supervisor: bool,
     add(_REQUEST_CONFIG_CHANGE_TOOL_SCHEMA)
     add(_SCHEDULE_WAKEUP_TOOL_SCHEMA)                    # cron self-scheduling
     add(_CANCEL_WAKEUP_TOOL_SCHEMA)
+    for _task_schema in TASK_TOOL_SCHEMAS:                # task tracking (workers AND supervisors)
+        add(_task_schema)
 
     if not is_supervisor:
         # Batch file reads (one call for 2-8 files vs N context-rebilling round trips).
@@ -375,12 +378,20 @@ class AgentDaemon:
 
         workspace_dir = _derive_workspace_path(cfg.get("team_id", "default"), name)
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        db_path = workspace_dir / f"{name}_queue.db"
-        self.queue = TaskQueue(db_path)
-        # Recover tasks stranded 'processing' by a previous run (crash/restart).
-        recovered = self.queue.recover_processing()
+        db_path = workspace_dir / f"{name}_inbox.db"
+        legacy_db_path = workspace_dir / f"{name}_queue.db"
+        if not db_path.exists() and legacy_db_path.exists():
+            legacy_db_path.rename(db_path)
+            for suffix in ("-wal", "-shm"):
+                legacy_extra = legacy_db_path.with_name(legacy_db_path.name + suffix)
+                if legacy_extra.exists():
+                    legacy_extra.rename(db_path.with_name(db_path.name + suffix))
+            log.info("[%s] Migrated inbox db %s -> %s", name, legacy_db_path.name, db_path.name)
+        self.inbox = InboxQueue(db_path)
+        # Recover messages stranded 'processing' by a previous run (crash/restart).
+        recovered = self.inbox.recover_processing()
         if recovered:
-            log.info("[%s] Recovered %d in-flight task(s) from previous run", name, recovered)
+            log.info("[%s] Recovered %d in-flight message(s) from previous run", name, recovered)
 
         # Each agent gets its own isolated Hermes home
         self._hermes_home = workspace_dir / ".hermes"
@@ -1030,9 +1041,9 @@ class AgentDaemon:
                 pass
 
         # Drain every pending task so they do not come back.
-        drained = self.queue.drain_pending(limit=9999)
+        drained = self.inbox.drain_pending(limit=9999)
         for t in drained:
-            self.queue.mark_done(t["id"])
+            self.inbox.mark_done(t["id"])
         if drained:
             log.info("[%s] Drained %d pending task(s) on stop", self.name, len(drained))
 
@@ -1064,7 +1075,7 @@ class AgentDaemon:
         # Clear the in-flight batch (status='processing') so the stopped work is
         # NOT resurrected by recover_processing() on the next restart. (A crash
         # intentionally requeues such rows; an explicit stop must not.)
-        cleared = self.queue.mark_processing_done()
+        cleared = self.inbox.mark_processing_done()
         if cleared:
             log.info("[%s] Cleared %d in-flight task(s) on stop", self.name, cleared)
 
@@ -1183,7 +1194,7 @@ class AgentDaemon:
         if from_agent not in _SYSTEM_SENDERS and self._hb_misses:
             log.info("[%s] Real message from '%s' — heartbeat backoff reset", self.name, from_agent)
             self._hb_misses = 0
-        task_id = self.queue.enqueue(from_agent, payload)
+        task_id = self.inbox.enqueue(from_agent, payload)
         log.info("[%s] Task queued from '%s': %s", self.name, from_agent, payload[:80])
         monitor_db.log_event(
             self.name,
@@ -1194,7 +1205,7 @@ class AgentDaemon:
         )
         _broadcast("queue_updated", {
             "agent_name": self.name,
-            "pending_count": self.queue.get_pending_count(),
+            "pending_count": self.inbox.get_pending_count(),
             "timestamp": time.time(),
         })
         self._signal_wake()
@@ -1267,7 +1278,7 @@ class AgentDaemon:
         # Claim a bounded batch first. If there's nothing to do, stay idle
         # SILENTLY — no state flip, no broadcast, no event. This is what keeps
         # an idle 24/7 teams from drowning the monitoring log in busy/idle churn.
-        tasks = self.queue.drain_pending(limit=MAX_BATCH_SIZE)
+        tasks = self.inbox.drain_pending(limit=MAX_BATCH_SIZE)
         if not tasks:
             return
 
@@ -1301,7 +1312,7 @@ class AgentDaemon:
             try:
                 if (not self._paused
                         and time.time() >= self._infra_hold_until
-                        and self.queue.get_pending_count() > 0
+                        and self.inbox.get_pending_count() > 0
                         and self._wake is not None):
                     self._wake.set()
             except Exception:
@@ -1331,7 +1342,7 @@ class AgentDaemon:
         if self.state == AGENT_STATE_BUSY:
             return
         try:
-            if self.queue.get_pending_count() > 0:
+            if self.inbox.get_pending_count() > 0:
                 return
         except Exception:
             return
@@ -1626,7 +1637,7 @@ class AgentDaemon:
             if daemon is not None:
                 pending = 0
                 try:
-                    pending = daemon.queue.get_pending_count()
+                    pending = daemon.inbox.get_pending_count()
                 except Exception:
                     pass
                 return (getattr(daemon, "state", None) or "?", pending)
@@ -1761,7 +1772,7 @@ class AgentDaemon:
         if self.state == AGENT_STATE_BUSY:
             return
         try:
-            if self.queue.get_pending_count() > 0:
+            if self.inbox.get_pending_count() > 0:
                 return  # a sweep (or other task) is already waiting — never pile up
         except Exception:
             return
@@ -2274,7 +2285,7 @@ class AgentDaemon:
                         INFRA_RETRY_BACKOFF_MAX_SECONDS,
                     )
                     self._infra_hold_until = time.time() + backoff
-                    self.queue.requeue_no_penalty(task_ids)
+                    self.inbox.requeue_no_penalty(task_ids)
                     log.warning("[%s] Held %d task(s) for provider recovery (no penalty)",
                                 self.name, len(task_ids))
                 else:
@@ -2437,7 +2448,7 @@ class AgentDaemon:
                 "timestamp": time.time(),
             })
             for t in tasks:
-                self.queue.mark_done(t["id"])
+                self.inbox.mark_done(t["id"])
 
             # Passive STATUS/FYI delivered in this turn are now consumed.
             self._passive_watermark = passive_max_id
@@ -2518,11 +2529,11 @@ class AgentDaemon:
         retry_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 <= MAX_TASK_RETRIES]
         dead_ids = [t["id"] for t in tasks if int(t.get("retries", 0)) + 1 > MAX_TASK_RETRIES]
         if retry_ids:
-            self.queue.requeue(retry_ids)
+            self.inbox.requeue(retry_ids)
             log.warning("[%s] Requeued %d task(s) for retry", self.name, len(retry_ids))
             self._signal_wake()
         if dead_ids:
-            self.queue.mark_failed(dead_ids)
+            self.inbox.mark_failed(dead_ids)
             log.error("[%s] %d task(s) exhausted retries -> dead-letter", self.name, len(dead_ids))
             monitor_db.log_event(self.name, "task_failed", data={"task_ids": dead_ids})
             _broadcast("task_failed", {
@@ -2535,6 +2546,6 @@ class AgentDaemon:
         self._loop = loop
         self._wake = asyncio.Event()
         # Wake immediately if tasks were recovered or arrived before the loop ran.
-        if self.queue.get_pending_count() > 0:
+        if self.inbox.get_pending_count() > 0:
             self._wake.set()
         self._sweep_task = loop.create_task(self.sweep_loop())

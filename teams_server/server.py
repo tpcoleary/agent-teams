@@ -56,6 +56,7 @@ from teams_server.config import (
     _derive_workspace_path,
 )
 from teams_server.monitoring import monitor_db
+from teams_server.tasks_db import task_db
 from teams_server.tools import _daemon_registry
 from teams_server.websocket import ws_broadcaster
 import teams_server.websocket as _ws_mod
@@ -327,7 +328,7 @@ async def websocket_endpoint(ws: WebSocket):
                 "agents": {
                     name: {
                         "state": d.state,
-                        "pending_count": d.queue.get_pending_count(),
+                        "pending_count": d.inbox.get_pending_count(),
                         "config": d.cfg,
                         "next_sweep_at": d.next_sweep_at,
                         "telemetry": dict(getattr(d, "_telemetry", {}) or {}),
@@ -529,7 +530,7 @@ async def agent_status(agent_name: str):
     return JSONResponse({
         "agent": agent_name,
         "state": daemon.state,
-        "pending_count": daemon.queue.get_pending_count(),
+        "pending_count": daemon.inbox.get_pending_count(),
         "session_id": daemon.cfg.get("session_id"),
     })
 
@@ -1857,7 +1858,7 @@ async def monitoring_agents(team_id: str = None):
             continue
         result[name] = {
             "state": d.state,
-            "pending_count": d.queue.get_pending_count(),
+            "pending_count": d.inbox.get_pending_count(),
             "next_sweep_at": d.next_sweep_at,
             "config": d.cfg,
             "allowed_peers": d.cfg.get("allowed_peers", []),
@@ -1888,10 +1889,10 @@ async def monitoring_queue(agent_name: str):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    tasks = daemon.queue.get_all_tasks(limit=100)
+    tasks = daemon.inbox.get_all_tasks(limit=100)
     return JSONResponse({
         "agent": agent_name,
-        "pending_count": daemon.queue.get_pending_count(),
+        "pending_count": daemon.inbox.get_pending_count(),
         "tasks": tasks,
     })
 
@@ -1907,7 +1908,7 @@ async def monitoring_stats(team_id: str = None):
         if name not in stats:
             stats[name] = {"events": {}, "total_messages": 0}
         stats[name]["current_state"] = daemon.state
-        stats[name]["pending_count"] = daemon.queue.get_pending_count()
+        stats[name]["pending_count"] = daemon.inbox.get_pending_count()
     return JSONResponse({"stats": stats, "timestamp": time.time()})
 
 
@@ -1915,6 +1916,93 @@ async def monitoring_stats(team_id: str = None):
 async def monitoring_recent(limit: int = 100):
     events = monitor_db.get_events(limit=limit)
     return JSONResponse({"events": events})
+
+
+# ---------------------------------------------------------------------------
+# Tasks — the human-meaningful work tracker (teams_server/tasks_db.py),
+# distinct from the per-agent message inbox above.
+# ---------------------------------------------------------------------------
+@app.get("/tasks")
+async def list_tasks(team_id: str = None, assigned_to: str = None,
+                      status: str = None, limit: int = 200):
+    tasks = task_db.list_tasks(team_id=team_id, assigned_to=assigned_to,
+                                status=status, limit=limit)
+    return JSONResponse({"tasks": tasks})
+
+
+@app.get("/tasks/agent/{agent_name}")
+async def list_tasks_for_agent(agent_name: str, status: str = None):
+    tasks = task_db.list_tasks(assigned_to=agent_name, status=status)
+    return JSONResponse({"agent": agent_name, "tasks": tasks})
+
+
+@app.get("/tasks/team/{team_id}")
+async def list_tasks_for_team(team_id: str, status: str = None):
+    tasks = task_db.list_tasks(team_id=team_id, status=status)
+    return JSONResponse({"team_id": team_id, "tasks": tasks})
+
+
+@app.get("/tasks/{task_id}")
+async def get_task(task_id: str):
+    task = task_db.get_task(task_id)
+    if task is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    subtasks = task_db.get_subtasks(task_id)
+    return JSONResponse({"task": task, "subtasks": subtasks})
+
+
+@app.patch("/tasks/{task_id}")
+async def patch_task(task_id: str, request: Request):
+    """Human/dashboard edit — more permissive than the agent tools (same trust
+    level as PATCH /agent/{name}/config): any field may be changed."""
+    import time
+
+    from teams_server.websocket import _broadcast
+
+    body = await request.json()
+    existing = task_db.get_task(task_id)
+    if existing is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    if "assigned_to" in body and body["assigned_to"] != existing.get("assigned_to"):
+        task_db.reassign_task(task_id, body["assigned_to"])
+    if "progress" in body:
+        try:
+            task_db.update_progress(task_id, body["progress"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    if "status" in body and body["status"] != existing.get("status"):
+        try:
+            task_db.set_status(task_id, body["status"], blocked_reason=body.get("blocked_reason"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    descriptive = {k: body[k] for k in ("title", "description", "priority") if k in body}
+    if descriptive:
+        try:
+            task_db.edit_task(task_id, **descriptive)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    task = task_db.get_task(task_id)
+    monitor_db.log_event("human", "task_updated", data={"task_id": task_id})
+    _broadcast("task_updated", {**task, "timestamp": time.time()})
+    return JSONResponse({"success": True, "task": task})
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task(task_id: str):
+    import time
+
+    from teams_server.websocket import _broadcast
+
+    deleted_subtask_ids = task_db.delete_task(task_id)
+    if deleted_subtask_ids is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    monitor_db.log_event("human", "task_deleted", data={"task_id": task_id})
+    _broadcast("task_deleted", {
+        "task_id": task_id, "subtask_ids": deleted_subtask_ids, "timestamp": time.time(),
+    })
+    return JSONResponse({"success": True, "deleted_subtask_ids": deleted_subtask_ids})
 
 
 # ---------------------------------------------------------------------------
@@ -2051,7 +2139,7 @@ async def health(request: Request):
     queue_depth = 0
     for d in daemons.values():
         try:
-            queue_depth += d.queue.get_pending_count()
+            queue_depth += d.inbox.get_pending_count()
         except Exception:
             pass
     return {

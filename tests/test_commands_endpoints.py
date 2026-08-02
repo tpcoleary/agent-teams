@@ -32,7 +32,7 @@ import teams_server.server as server_mod  # noqa: E402
 AGENT = "researcher"
 
 
-class StubQueue:
+class StubInbox:
     def __init__(self):
         self.pending = []
 
@@ -67,7 +67,7 @@ class StubDaemon:
         self.state = state
         self._paused = False
         self.cfg = {"team_id": "acme", "model": "gpt-5", "session_id": "s1"}
-        self.queue = StubQueue()
+        self.inbox = StubInbox()
         self._ai_agent = StubAI()
         self.ingested = []
         self.stopped = 0
@@ -187,7 +187,7 @@ def test_unknown_command_is_rejected_not_forwarded(client, daemon):
 
 
 def test_repeated_command_runs_every_time(client, daemon):
-    """The queue dedups byte-identical pending payloads (queue.py:57-85).
+    """The inbox dedups byte-identical pending payloads (inbox.py:57-85).
 
     Commands must not inherit that: /usage twice has to answer twice.
     """

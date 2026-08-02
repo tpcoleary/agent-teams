@@ -46,7 +46,7 @@ from teams_server.prompts import (  # noqa: E402
     strip_stale_live_context,
 )
 from teams_server.monitoring import MonitoringDB  # noqa: E402
-from teams_server.queue import TaskQueue  # noqa: E402
+from teams_server.inbox import InboxQueue  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -136,20 +136,20 @@ def test_turn_tool_signatures_normalization():
 
 
 # ---------------------------------------------------------------------------
-# 3. Queue dedup
+# 3. Inbox dedup
 # ---------------------------------------------------------------------------
-def test_queue_dedup_identical_pending(tmp_path):
-    q = TaskQueue(tmp_path / "q.db")
+def test_inbox_dedup_identical_pending(tmp_path):
+    q = InboxQueue(tmp_path / "q.db")
     a = q.enqueue("peer", "same payload")
     b = q.enqueue("peer", "same payload")
     assert a == b
     assert q.get_pending_count() == 1
-    # different sender or payload -> distinct tasks
+    # different sender or payload -> distinct messages
     c = q.enqueue("other", "same payload")
     d = q.enqueue("peer", "different payload")
     assert len({a, c, d}) == 3
     assert q.get_pending_count() == 3
-    # once claimed (processing), an identical re-send is a NEW task again
+    # once claimed (processing), an identical re-send is a NEW message again
     q.drain_pending(limit=10)
     e = q.enqueue("peer", "same payload")
     assert e != a

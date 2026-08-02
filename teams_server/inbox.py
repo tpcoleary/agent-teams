@@ -1,4 +1,4 @@
-"""SQLite-backed task queue per agent."""
+"""SQLite-backed peer-message inbox per agent."""
 
 import logging
 import sqlite3
@@ -8,18 +8,18 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
-log = logging.getLogger("teams.queue")
+log = logging.getLogger("teams.inbox")
 
 # Terminal (done/failed) rows are kept only this long. Without a sweep the
-# per-agent *_queue.db grows monotonically forever on a 24/7 run, since payloads
+# per-agent *_inbox.db grows monotonically forever on a 24/7 run, since payloads
 # (e.g. supervisor sweeps up to ~32KB) are never reclaimed. Only terminal rows
 # are ever pruned — pending/processing work is always preserved.
 DONE_RETENTION_DAYS = 7
 
 
-class TaskQueue:
+class InboxQueue:
     SCHEMA = """
-    CREATE TABLE IF NOT EXISTS tasks (
+    CREATE TABLE IF NOT EXISTS messages (
         id           TEXT PRIMARY KEY,
         from_agent   TEXT NOT NULL,
         payload      TEXT NOT NULL,
@@ -28,7 +28,7 @@ class TaskQueue:
         processed_at REAL,
         retries      INTEGER NOT NULL DEFAULT 0
     );
-    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status, created_at);
     """
 
     def __init__(self, db_path: Path) -> None:
@@ -49,49 +49,49 @@ class TaskQueue:
         with self._conn() as conn:
             conn.executescript(self.SCHEMA)
             # Migrate older DBs that predate the retries column.
-            cols = [c[1] for c in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(messages)").fetchall()]
             if "retries" not in cols:
-                conn.execute("ALTER TABLE tasks ADD COLUMN retries INTEGER NOT NULL DEFAULT 0")
+                conn.execute("ALTER TABLE messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0")
             conn.commit()
 
     def enqueue(self, from_agent: str, payload: str) -> str:
-        """Add a task; idempotent on identical pending work.
+        """Add a message; idempotent on identical pending work.
 
         If THE SAME sender already has a byte-identical payload sitting
-        'pending' (not yet claimed), return that task's id instead of inserting
-        a twin. This absorbs duplicate wakes structurally: a peer double-sending
-        the same message, or multiple corrective layers (turn guard, loop
-        detector, supervisor) injecting the same nudge, now cost ONE turn
-        instead of stacking. Time-stamped payloads (heartbeat/cron) differ
-        byte-wise, so periodic wake-ups are never suppressed.
+        'pending' (not yet claimed), return that message's id instead of
+        inserting a twin. This absorbs duplicate wakes structurally: a peer
+        double-sending the same message, or multiple corrective layers (turn
+        guard, loop detector, supervisor) injecting the same nudge, now cost
+        ONE turn instead of stacking. Time-stamped payloads (heartbeat/cron)
+        differ byte-wise, so periodic wake-ups are never suppressed.
         """
         with self._lock, self._conn() as conn:
             row = conn.execute(
-                "SELECT id FROM tasks WHERE status='pending' AND from_agent=? "
+                "SELECT id FROM messages WHERE status='pending' AND from_agent=? "
                 "AND payload=? LIMIT 1",
                 (from_agent, payload),
             ).fetchone()
             if row:
-                log.info("[Queue] Dedup: identical pending task %s from '%s' — not re-enqueued",
+                log.info("[Inbox] Dedup: identical pending message %s from '%s' — not re-enqueued",
                          row[0][:8], from_agent)
                 return row[0]
-            task_id = str(uuid.uuid4())
+            msg_id = str(uuid.uuid4())
             conn.execute(
-                "INSERT INTO tasks (id, from_agent, payload, status, created_at) VALUES (?,?,?,?,?)",
-                (task_id, from_agent, payload, "pending", time.time()),
+                "INSERT INTO messages (id, from_agent, payload, status, created_at) VALUES (?,?,?,?,?)",
+                (msg_id, from_agent, payload, "pending", time.time()),
             )
             conn.commit()
-        log.info("[Queue] Enqueued task %s from '%s'", task_id[:8], from_agent)
-        return task_id
+        log.info("[Inbox] Enqueued message %s from '%s'", msg_id[:8], from_agent)
+        return msg_id
 
     def drain_pending(self, limit: int = 0) -> List[Dict[str, Any]]:
-        """Atomically claim up to ``limit`` pending tasks (0 = no cap).
+        """Atomically claim up to ``limit`` pending messages (0 = no cap).
 
         The cap is backpressure: it bounds how many messages get concatenated
         into a single LLM turn so a flood can't blow the context window.
         """
         with self._lock, self._conn() as conn:
-            sql = "SELECT id, from_agent, payload, retries FROM tasks WHERE status='pending' ORDER BY created_at"
+            sql = "SELECT id, from_agent, payload, retries FROM messages WHERE status='pending' ORDER BY created_at"
             if limit and limit > 0:
                 sql += f" LIMIT {int(limit)}"
             rows = conn.execute(sql).fetchall()
@@ -99,7 +99,7 @@ class TaskQueue:
                 ids = [r[0] for r in rows]
                 placeholders = ",".join("?" * len(ids))
                 conn.execute(
-                    f"UPDATE tasks SET status='processing', processed_at=? WHERE id IN ({placeholders})",
+                    f"UPDATE messages SET status='processing', processed_at=? WHERE id IN ({placeholders})",
                     [time.time()] + ids,
                 )
                 conn.commit()
@@ -107,24 +107,24 @@ class TaskQueue:
 
     def mark_done(self, task_id: str):
         with self._lock, self._conn() as conn:
-            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+            conn.execute("UPDATE messages SET status='done' WHERE id=?", (task_id,))
             conn.commit()
 
     def requeue(self, task_ids: List[str]):
-        """Return tasks to 'pending' and bump their retry counter (after a failure)."""
+        """Return messages to 'pending' and bump their retry counter (after a failure)."""
         if not task_ids:
             return
         with self._lock, self._conn() as conn:
             placeholders = ",".join("?" * len(task_ids))
             conn.execute(
-                f"UPDATE tasks SET status='pending', processed_at=NULL, retries=retries+1 "
+                f"UPDATE messages SET status='pending', processed_at=NULL, retries=retries+1 "
                 f"WHERE id IN ({placeholders})",
                 task_ids,
             )
             conn.commit()
 
     def requeue_no_penalty(self, task_ids: List[str]):
-        """Return tasks to 'pending' WITHOUT bumping the retry counter.
+        """Return messages to 'pending' WITHOUT bumping the retry counter.
 
         Used for infrastructure failures (LLM proxy down, billing exhausted)
         that are not the task's fault — the work should wait for recovery and
@@ -134,20 +134,20 @@ class TaskQueue:
         with self._lock, self._conn() as conn:
             placeholders = ",".join("?" * len(task_ids))
             conn.execute(
-                f"UPDATE tasks SET status='pending', processed_at=NULL "
+                f"UPDATE messages SET status='pending', processed_at=NULL "
                 f"WHERE id IN ({placeholders})",
                 task_ids,
             )
             conn.commit()
 
     def mark_failed(self, task_ids: List[str]):
-        """Dead-letter tasks that exhausted their retries."""
+        """Dead-letter messages that exhausted their retries."""
         if not task_ids:
             return
         with self._lock, self._conn() as conn:
             placeholders = ",".join("?" * len(task_ids))
             conn.execute(
-                f"UPDATE tasks SET status='failed', processed_at=? WHERE id IN ({placeholders})",
+                f"UPDATE messages SET status='failed', processed_at=? WHERE id IN ({placeholders})",
                 [time.time()] + task_ids,
             )
             conn.commit()
@@ -162,13 +162,13 @@ class TaskQueue:
         cutoff = time.time() - retention_days * 86400
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "DELETE FROM tasks WHERE status IN ('done','failed') AND created_at < ?",
+                "DELETE FROM messages WHERE status IN ('done','failed') AND created_at < ?",
                 (cutoff,),
             )
             conn.commit()
             deleted = cur.rowcount or 0
         if deleted:
-            log.info("[Queue] Pruned %d terminal task(s) older than %dd", deleted, retention_days)
+            log.info("[Inbox] Pruned %d terminal message(s) older than %dd", deleted, retention_days)
         return deleted
 
     def mark_processing_done(self) -> int:
@@ -180,25 +180,25 @@ class TaskQueue:
         """
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "UPDATE tasks SET status='done', processed_at=? WHERE status='processing'",
+                "UPDATE messages SET status='done', processed_at=? WHERE status='processing'",
                 (time.time(),),
             )
             conn.commit()
             return cur.rowcount or 0
 
     def recover_processing(self) -> int:
-        """Requeue tasks left 'processing' by a previous run that crashed/restarted.
+        """Requeue messages left 'processing' by a previous run that crashed/restarted.
 
-        Without this, a restart would either lose in-flight tasks (old behavior
-        deleted the DB) or strand them forever in 'processing'. Returns the count
-        recovered.
+        Without this, a restart would either lose in-flight messages (old
+        behavior deleted the DB) or strand them forever in 'processing'.
+        Returns the count recovered.
 
         Also runs a bounded retention sweep (``prune_terminal``) at startup so
         terminal rows don't accumulate forever across a 24/7 run.
         """
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "UPDATE tasks SET status='pending', processed_at=NULL WHERE status='processing'"
+                "UPDATE messages SET status='pending', processed_at=NULL WHERE status='processing'"
             )
             conn.commit()
             recovered = cur.rowcount or 0
@@ -207,13 +207,13 @@ class TaskQueue:
 
     def get_pending_count(self) -> int:
         with self._lock, self._conn() as conn:
-            row = conn.execute("SELECT COUNT(*) FROM tasks WHERE status='pending'").fetchone()
+            row = conn.execute("SELECT COUNT(*) FROM messages WHERE status='pending'").fetchone()
             return row[0] if row else 0
 
     def get_all_tasks(self, limit: int = 50) -> List[dict]:
         with self._lock, self._conn() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM messages ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]

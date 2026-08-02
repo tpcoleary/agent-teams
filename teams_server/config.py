@@ -179,6 +179,7 @@ def _resolve_dashboard_dir() -> Path:
 DATA_ROOT = _resolve_data_root()
 AGENTS_CONFIG_PATH = DATA_ROOT / "agents_config.json"
 MONITORING_DB = DATA_ROOT / "monitoring.db"
+TASKS_DB = DATA_ROOT / "tasks.db"
 DASHBOARD_DIR = _resolve_dashboard_dir()
 
 WORKSPACE_ROOT = DATA_ROOT / "teams"

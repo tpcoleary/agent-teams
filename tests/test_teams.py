@@ -189,8 +189,8 @@ class TeamsLogHandler(logging.Handler):
 # ---------------------------------------------------------------------------
 # SQLite Task Queue
 # ---------------------------------------------------------------------------
-class TaskQueue:
-    """Per-agent SQLite-backed task queue."""
+class InboxQueue:
+    """Per-agent SQLite-backed message inbox."""
 
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS tasks (
@@ -224,7 +224,7 @@ class TaskQueue:
                 (task_id, from_agent, payload, "pending", time.time()),
             )
             conn.commit()
-        log.info("[Queue] Enqueued task %s from '%s'", task_id[:8], from_agent)
+        log.info("[Inbox] Enqueued task %s from '%s'", task_id[:8], from_agent)
         record_event("task_enqueued", {
             "task_id": task_id, "from_agent": from_agent, "payload": payload,
             "target_agent": target_agent,
@@ -248,7 +248,7 @@ class TaskQueue:
         result = [{"id": r[0], "from_agent": r[1], "payload": r[2]} for r in rows]
         if result:
             record_event("task_draining", {
-                "agent": self.db_path.stem.replace("_queue", ""),
+                "agent": self.db_path.stem.replace("_inbox", ""),
                 "task_ids": [r["id"] for r in result],
             })
         return result
@@ -476,8 +476,8 @@ class AgentDaemon:
 
         workspace_dir = WORKSPACE_ROOT / cfg["workspace"]
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        db_path = workspace_dir / f"{name}_queue.db"
-        self.queue = TaskQueue(db_path)
+        db_path = workspace_dir / f"{name}_inbox.db"
+        self.inbox = InboxQueue(db_path)
 
         self._ai_agent = None  # lazy-loaded in _ensure_agent()
         self._sweep_task: Optional[asyncio.Task] = None
@@ -540,7 +540,7 @@ class AgentDaemon:
     # Task ingestion (called by peer via HTTP)
     # ------------------------------------------------------------------
     def ingest_task(self, from_agent: str, payload: str) -> str:
-        task_id = self.queue.enqueue(from_agent, payload, target_agent=self.name)
+        task_id = self.inbox.enqueue(from_agent, payload, target_agent=self.name)
         log.info("[%s] Task queued from '%s': %s", self.name, from_agent, payload[:80])
         return task_id
 
@@ -563,7 +563,7 @@ class AgentDaemon:
             record_event("agent_state_changed", {"agent": self.name, "state": self.state})
 
         try:
-            tasks = self.queue.drain_pending()
+            tasks = self.inbox.drain_pending()
             if not tasks:
                 with self._lock:
                     self.state = AGENT_STATE_IDLE
@@ -617,7 +617,7 @@ class AgentDaemon:
                 "agent": self.name, "role": "assistant", "content": str(final)[:500],
                 "task_id": task_id,
             })
-            self.queue.mark_done(task_id)
+            self.inbox.mark_done(task_id)
         except Exception as exc:
             log.error("[%s] Task %s failed: %s", self.name, task_id[:8], exc)
             record_event("task_processed", {"task_id": task_id, "status": "failed", "error": str(exc)})
@@ -848,7 +848,7 @@ async def agent_queue(agent_name: str):
     daemon = daemons.get(agent_name)
     if daemon is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
-    tasks = daemon.queue.get_all_tasks()
+    tasks = daemon.inbox.get_all_tasks()
     return JSONResponse({
         "agent": agent_name,
         "tasks": tasks,
@@ -901,7 +901,7 @@ async def on_startup():
 
     # Clean up previous queue databases for a clean test run
     for agent_name, cfg in AGENTS.items():
-        db_path = WORKSPACE_ROOT / cfg["workspace"] / f"{agent_name}_queue.db"
+        db_path = WORKSPACE_ROOT / cfg["workspace"] / f"{agent_name}_inbox.db"
         if db_path.exists():
             try:
                 db_path.unlink()
