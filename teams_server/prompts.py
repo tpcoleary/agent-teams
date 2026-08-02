@@ -61,9 +61,11 @@ turn and the current block disagree, the current block is right.
 
 1. **Safety.** Nothing destructive, irreversible, or production-touching without
    the lease protocol below. Genuinely unsure → stop and escalate.
-2. **Close what you owe.** OUTSTANDING WORK lists the open TASK/QUESTIONs
-   addressed to you — finish those and reply kind=RESULT (reply_to=<id>) before
-   starting anything new.
+2. **Close what you owe.** YOUR TASKS lists the work assigned to you — finish
+   those first. Close each one with `mark_task_complete(task_id, summary)`,
+   which reports back to whoever created it; you do NOT also message them.
+   OUTSTANDING WORK lists open QUESTIONs — answer those with kind=RESULT
+   (reply_to=<id>) before starting anything new.
 3. **Don't redo settled work.** RECENTLY COMPLETED and the DECISION LOG show
    what is already done and decided. If what you're about to do (or delegate)
    is there, USE the existing result instead.
@@ -175,7 +177,7 @@ already built it.
   enough, use it.
 - ONE canonical file per deliverable: search_files first, then extend or
   overwrite it. Never spawn variants (x_v2, x_fixed, x_final).
-- No concrete ask → STATUS/FYI, or send nothing. NEVER a TASK/QUESTION to
+- No concrete ask → STATUS/FYI, or send nothing. NEVER a QUESTION to
   acknowledge, confirm, or re-state something unchanged.
 - You may message ONLY: {allowed_peers_list}.
 
@@ -314,8 +316,8 @@ TEXT_ONLY_TURN_NUDGE = (
     "[LOST OUTPUT — your last turn ended in free text with no committing tool call]\n"
     "That closing text reached no teammate and changed nothing (only tool calls "
     "deliver). A status summary is not a turn. Do exactly ONE of these now, then stop:\n"
-    "• If there is a next action — delegate it with `send_peer_message` (TASK), or "
-    "publish/deploy/send it with the tool that does it.\n"
+    "• If there is a next action — assign it with `create_task` (yours or a "
+    "peer's), or publish/deploy/send it with the tool that does it.\n"
     "• If you only established a fact others need — record it with ONE `log_decision`.\n"
     "• If there is genuinely nothing left to do — end with a SINGLE `log_decision` "
     "noting the conclusion, or no output at all.\n"
@@ -649,6 +651,66 @@ def _age_str(ts: float) -> str:
     return f"{secs / 86400:.1f}d"
 
 
+def _my_tasks_block(team_id: str, agent_id: str, limit: int = 12) -> str:
+    """This agent's open tracked work, both directions.
+
+    Tasks are the primary assignment channel (create_task), so they need the
+    same every-turn visibility the delegation ledger has — otherwise an agent
+    only learns what it owes by remembering to call list_my_tasks, and work
+    assigned while it was busy is invisible until something reminds it.
+    """
+    try:
+        from teams_server.tasks_db import task_db
+
+        mine = task_db.list_tasks(team_id=team_id, assigned_to=agent_id,
+                                  open_only=True, limit=limit)
+        delegated = [
+            t for t in task_db.list_tasks(team_id=team_id, created_by=agent_id,
+                                          open_only=True, limit=limit)
+            if t.get("assigned_to") != agent_id
+        ]
+        if not mine and not delegated:
+            return "(no open tasks.)"
+
+        def _line(t: dict, who: str) -> str:
+            age = _age_str(t.get("created_at", 0))
+            status = t.get("status", "?")
+            bits = status
+            if status == "in_progress":
+                bits = f"in_progress {t.get('progress', 0)}%"
+            elif status == "blocked":
+                bits = f"BLOCKED: {t.get('blocked_reason') or 'no reason given'}"
+            prio = {0: "low", 2: "HIGH", 3: "URGENT"}.get(t.get("priority"))
+            prio_s = f" !{prio}" if prio else ""
+            overdue = ""
+            try:
+                import time as _t
+                if _t.time() - float(t.get("created_at", 0)) > 7200:
+                    overdue = " ⚠ open >2h"
+            except Exception:
+                pass
+            return (f"    - id={str(t.get('id',''))[:8]} [{bits}]{prio_s} "
+                    f"{t.get('title','')} ({who}, {age} ago){overdue}")
+
+        lines = []
+        if mine:
+            lines.append(
+                "  ASSIGNED TO YOU — do these first. Close each with "
+                "mark_task_complete(task_id, summary), which reports to its "
+                "creator for you; if stuck use mark_task_blocked(task_id, reason):")
+            for t in mine:
+                lines.append(_line(t, f"from {t.get('created_by','?')}"))
+        if delegated:
+            lines.append(
+                "  YOU ASSIGNED (in flight — they report back automatically when "
+                "they finish; do NOT ping them for status):")
+            for t in delegated:
+                lines.append(_line(t, f"to {t.get('assigned_to','?')}"))
+        return "\n".join(lines)
+    except Exception as e:
+        return f"(could not load tasks: {e})"
+
+
 def _open_delegations_block(team_id: str, agent_id: str) -> str:
     """What this agent owes and is owed, from the delegation ledger — so an agent
     (especially a coordinator) sees outstanding work without polling peers.
@@ -674,7 +736,7 @@ def _open_delegations_block(team_id: str, agent_id: str) -> str:
 
         lines = []
         if owe:
-            lines.append("  YOU OWE A RESULT (open TASK/QUESTION sent to you):")
+            lines.append("  YOU OWE AN ANSWER (open QUESTION sent to you):")
             for d in owe:
                 lines.append(_line(d, f"from {d['from_agent']}"))
         if awaiting:
@@ -1014,6 +1076,7 @@ def compose_live_context(
     recent = _recent_peer_messages(team_id, full_config, limit=LIVE_CTX_PEER_MESSAGES)
     decisions = _recent_decisions(team_id, limit=LIVE_CTX_DECISIONS)
     delegations = _open_delegations_block(team_id, agent_id)
+    my_tasks = _my_tasks_block(team_id, agent_id)
     completed = _recently_completed_block(team_id, limit=LIVE_CTX_COMPLETED)
     humans = _waiting_on_human_block(team_id, full_config)
     crons = _build_cron_summary(full_config, agent_id)
@@ -1034,7 +1097,10 @@ def compose_live_context(
         "redo or contradict settled work. Append with log_decision (one line, "
         "sparingly):\n"
         f"{decisions}\n\n"
-        "OUTSTANDING WORK (delegation ledger — close items by sending a RESULT):\n"
+        "YOUR TASKS (tracked work — the team's and the human's view of who is "
+        "doing what; assign with create_task):\n"
+        f"{my_tasks}\n\n"
+        "OUTSTANDING WORK (open QUESTIONs — close each by replying kind=RESULT):\n"
         f"{delegations}\n\n"
         "RECENTLY COMPLETED (already delivered — do NOT re-delegate or redo these; "
         "use the existing results):\n"

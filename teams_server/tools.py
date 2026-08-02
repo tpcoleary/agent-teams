@@ -215,20 +215,22 @@ _SEND_PEER_MESSAGE_TOOL_SCHEMA = {
     "function": {
         "name": "send_peer_message",
         "description": (
-            "Send a message to a linked peer. The `kind` controls whether it WAKES the "
-            "recipient — choose it deliberately, it is how the teams avoids endless "
-            "status ping-pong:\n"
-            "• TASK — delegate concrete work. WAKES them; they owe you a RESULT. Returns a "
-            "task_id.\n"
-            "• QUESTION — ask something you need answered to proceed. WAKES them. Returns a "
-            "task_id.\n"
-            "• RESULT — report a finished deliverable back to whoever delegated it. WAKES "
-            "that one peer and CLOSES the task. Pass `reply_to` = the task_id you were given.\n"
-            "• STATUS — a progress update. Does NOT wake anyone; it just appears in the "
-            "team's recent-messages feed. Use this instead of a TASK when you have nothing "
-            "for them to DO.\n"
+            "Talk to a linked peer. This is for CONVERSATION, not for handing out "
+            "work — to give a peer something to do, use `create_task` instead "
+            "(it wakes them the same way and tracks the work).\n"
+            "The `kind` controls whether it WAKES the recipient — choose it "
+            "deliberately, it is how the teams avoids endless status ping-pong:\n"
+            "• STATUS — a progress update. Does NOT wake anyone; it appears in the "
+            "team's recent-messages feed. This is the usual choice.\n"
             "• FYI — informational note. Does NOT wake anyone.\n"
-            "NEVER send a TASK/QUESTION just to acknowledge or confirm — that creates a "
+            "• QUESTION — ask something you genuinely need answered to proceed. "
+            "WAKES them; they owe you a RESULT. Not for anything you want DONE — "
+            "that's a task.\n"
+            "• RESULT — answer a QUESTION someone asked you. WAKES that one peer "
+            "and closes the question. Pass `reply_to` = the id you were given. "
+            "(You do NOT need this to report finished task work — "
+            "mark_task_complete already reports to whoever created the task.)\n"
+            "NEVER send a QUESTION just to acknowledge or confirm — that creates a "
             "loop. If you have no concrete ask, use STATUS/FYI (or send nothing)."
         ),
         "parameters": {
@@ -238,16 +240,16 @@ _SEND_PEER_MESSAGE_TOOL_SCHEMA = {
                 "message": {"type": "string", "description": "The message body."},
                 "kind": {
                     "type": "string",
-                    "enum": ["TASK", "QUESTION", "RESULT", "STATUS", "FYI"],
+                    "enum": ["STATUS", "FYI", "QUESTION", "RESULT"],
                     "description": (
-                        "Message type. TASK/QUESTION/RESULT wake the recipient; STATUS/FYI "
-                        "do not. Defaults to TASK if omitted."
+                        "Message type. QUESTION/RESULT wake the recipient; STATUS/FYI "
+                        "do not. Defaults to STATUS. To assign work, use create_task."
                     ),
                 },
                 "reply_to": {
                     "type": "string",
                     "description": (
-                        "For kind=RESULT only: the task_id of the TASK/QUESTION you are "
+                        "For kind=RESULT only: the id of the QUESTION you are "
                         "answering, so the system can close it."
                     ),
                 },
@@ -805,12 +807,31 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     # passive (they surface in the recipient's recent-messages feed but create no
     # task), which is the structural cure for the acknowledge/status ping-pong —
     # an agent literally cannot wake a peer just to confirm a status.
-    kind = (args.get("kind") or "TASK").strip().upper()
-    if kind not in ("TASK", "QUESTION", "RESULT", "STATUS", "FYI"):
-        kind = "TASK"
+    #
+    # TASK is deliberately GONE: assigning work is create_task's job. Two doors
+    # for one delegation meant only one of them (this one) wrote the delegation
+    # ledger, so an agent that used both — as observed in the 2026-08-02 run —
+    # opened a ledger entry that mark_task_complete could never close. One door,
+    # no phantom. Assignment now lives in one place, with a real row behind it.
+    kind = (args.get("kind") or "STATUS").strip().upper()
+    if kind == "TASK":
+        return json.dumps({
+            "success": False,
+            "error": (
+                "send_peer_message no longer assigns work. Use "
+                "create_task(title=…, assigned_to=\"" + to_agent + "\", description=…) "
+                "instead — it wakes them exactly the same way, and it also gives the "
+                "work a tracked row with a status, an owner and a progress bar, so the "
+                "team and the human can see it. You'll get the report back "
+                "automatically when they call mark_task_complete. Use this tool for "
+                "STATUS/FYI updates, or QUESTION when you need an answer to proceed."
+            ),
+        })
+    if kind not in ("QUESTION", "RESULT", "STATUS", "FYI"):
+        kind = "STATUS"
     reply_to = (args.get("reply_to") or "").strip()
     team_id = cfg["agents"].get(caller, {}).get("team_id")
-    waking = kind in ("TASK", "QUESTION", "RESULT")
+    waking = kind in ("QUESTION", "RESULT")
     # DETERMINISTIC correlation id: derive it from the message identity, NOT a
     # fresh uuid. A random id was embedded in the header, so two identical TASK
     # sends produced different payloads and slipped past the queue's byte-identical
@@ -825,16 +846,19 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     if waking:
         # Embed a correlation header so the recipient can reference this thread in
         # its RESULT (the from_agent is already shown by the batch builder).
-        if kind in ("TASK", "QUESTION"):
+        if kind == "QUESTION":
             header = (
-                f"[{kind} · id={msg_id} · from {caller} — when done, reply with "
+                f"[QUESTION · id={msg_id} · from {caller} — when done, reply with "
                 f"send_peer_message(to_agent=\"{caller}\", kind=\"RESULT\", "
                 f"reply_to=\"{msg_id}\")]\n"
             )
         else:  # RESULT
             header = f"[RESULT · from {caller}" + (f" · re {reply_to}" if reply_to else "") + "]\n"
         task_id = target.ingest_task(from_agent=caller, payload=header + message)
-        if kind in ("TASK", "QUESTION"):
+        # QUESTION opens a ledger entry, RESULT closes one. These are now the ONLY
+        # writer/closer pair for the ledger, so it can no longer be left holding a
+        # half-finished delegation that some other tool completed.
+        if kind == "QUESTION":
             monitor_db.open_delegation(msg_id, caller, to_agent, kind,
                                        summary=message[:160], team_id=team_id)
         elif kind == "RESULT" and reply_to:

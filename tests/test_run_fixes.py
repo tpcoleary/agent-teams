@@ -162,6 +162,17 @@ class NullDB:
     def log_event(self, *a, **k):
         pass
 
+    # Present so tests can monkeypatch/spy on it by name (setattr requires the
+    # attribute to exist, which catches a misspelled patch target).
+    def open_delegation(self, *a, **k):
+        pass
+
+    def answer_delegation(self, *a, **k):
+        return False
+
+    def log_message(self, *a, **k):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def _null_monitor(monkeypatch):
@@ -293,6 +304,109 @@ def test_normal_peer_message_still_succeeds(_peer_msg_env):
         {"to_agent": "w2", "message": "hi", "kind": "STATUS"},
         task_id="agent_name:w1"))
     assert out["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# One door for assigning work: create_task, not send_peer_message(kind=TASK)
+# ---------------------------------------------------------------------------
+def test_kind_task_is_rejected_and_points_at_create_task(_peer_msg_env):
+    """Two doors for one delegation meant only send_peer_message wrote the
+    delegation ledger, so an agent that used both (observed 2026-08-02, 12:52:07
+    + 12:52:39) opened a ledger entry mark_task_complete could never close."""
+    import json
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "go do this", "kind": "TASK"},
+        task_id="agent_name:w1"))
+    assert out["success"] is False
+    assert "create_task" in out["error"]
+    assert "w2" in out["error"], "the error should be copy-pasteable"
+
+
+def test_rejected_task_does_not_wake_or_record_anything(_peer_msg_env, monkeypatch):
+    """A rejected assignment must be a no-op, not a half-delivery."""
+    import json
+
+    delivered = []
+    monkeypatch.setitem(
+        tools_mod._daemon_registry, "w2",
+        types.SimpleNamespace(
+            ingest_task=lambda **k: delivered.append(k) or "t1"))
+    opened = []
+    monkeypatch.setattr(tools_mod.monitor_db, "open_delegation",
+                        lambda *a, **k: opened.append(a))
+
+    json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "work", "kind": "TASK"},
+        task_id="agent_name:w1"))
+    assert delivered == []
+    assert opened == []
+
+
+def test_default_kind_is_now_passive(_peer_msg_env, monkeypatch):
+    """Omitting `kind` used to mean TASK — a WAKE. Since waking someone to do
+    something is create_task's job now, the safe default is a passive STATUS:
+    a bare message can no longer silently conscript a peer."""
+    import json
+
+    delivered = []
+    monkeypatch.setitem(
+        tools_mod._daemon_registry, "w2",
+        types.SimpleNamespace(
+            ingest_task=lambda **k: delivered.append(k) or "t1"))
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "fyi, deploy went out"},
+        task_id="agent_name:w1"))
+    assert out["success"] is True
+    assert out["kind"] == "STATUS"
+    assert delivered == [], "a default-kind message must not wake anyone"
+
+
+def test_unknown_kind_falls_back_to_passive(_peer_msg_env):
+    import json
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "hi", "kind": "NONSENSE"},
+        task_id="agent_name:w1"))
+    assert out["kind"] == "STATUS"
+
+
+def test_question_still_wakes_and_opens_the_ledger(tmp_path, monkeypatch):
+    """QUESTION -> RESULT is now the ONLY writer/closer pair for the ledger, so
+    it cannot be left holding a delegation another tool completed."""
+    import json
+
+    import teams_server.config as config_mod
+
+    db = MonitoringDB(tmp_path / "mon.db")
+    monkeypatch.setattr(config_mod, "load_agents_config", lambda: SELF_MSG_CFG)
+    monkeypatch.setattr(tools_mod, "monitor_db", db)
+    monkeypatch.setattr(tools_mod, "_broadcast", lambda *a, **k: None)
+    delivered = []
+    monkeypatch.setitem(
+        tools_mod._daemon_registry, "w2",
+        types.SimpleNamespace(
+            ingest_task=lambda **k: delivered.append(k) or "t1"))
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "which region?", "kind": "QUESTION"},
+        task_id="agent_name:w1"))
+    assert out["success"] is True
+    assert len(delivered) == 1, "a QUESTION must still wake the recipient"
+    open_rows = db.get_open_delegations(to_agent="w2", team_id="t1")
+    assert len(open_rows) == 1
+    assert open_rows[0]["kind"] == "QUESTION"
+
+    # ...and the answer closes it, leaving nothing outstanding.
+    monkeypatch.setitem(
+        tools_mod._daemon_registry, "w1",
+        types.SimpleNamespace(ingest_task=lambda **k: "t2"))
+    json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w1", "message": "us-east-1", "kind": "RESULT",
+         "reply_to": open_rows[0]["msg_id"]},
+        task_id="agent_name:w2"))
+    assert db.get_open_delegations(to_agent="w2", team_id="t1") == []
 
 
 def test_notification_turns_exempt_from_text_only_guard():

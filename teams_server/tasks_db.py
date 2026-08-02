@@ -159,6 +159,8 @@ class TasksDB:
         assigned_to: Optional[str] = None,
         status: Optional[str] = None,
         limit: int = 200,
+        created_by: Optional[str] = None,
+        open_only: bool = False,
     ) -> List[dict]:
         sql = "SELECT * FROM tasks WHERE 1=1"
         params: list = []
@@ -168,9 +170,15 @@ class TasksDB:
         if assigned_to:
             sql += " AND assigned_to = ?"
             params.append(assigned_to)
+        if created_by:
+            sql += " AND created_by = ?"
+            params.append(created_by)
         if status:
             sql += " AND status = ?"
             params.append(status)
+        if open_only:
+            sql += f" AND status NOT IN ({','.join('?' * len(TERMINAL_STATUSES))})"
+            params.extend(TERMINAL_STATUSES)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(max(1, int(limit)))
         with self._conn() as conn:

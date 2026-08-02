@@ -34,6 +34,9 @@ from teams_server.monitoring import monitor_db
 
 log = logging.getLogger("teams.loopdetector")
 
+# Kinds that WAKE the recipient. "TASK" is retained because this scans
+# historical message rows, which still carry it from before assignment moved to
+# create_task; send_peer_message no longer produces it.
 _WAKING = {"TASK", "QUESTION", "RESULT"}
 
 # signature -> last alert time, for cooldown dedup across scans.

@@ -275,6 +275,106 @@ def test_compose_live_context_sentinels_and_sections(tmp_path, monkeypatch):
     assert "open item" not in stripped and "follow-up task" in stripped
 
 
+# ---------------------------------------------------------------------------
+# 9. YOUR TASKS live-context block
+# ---------------------------------------------------------------------------
+def _tasks_block(tmp_path, monkeypatch, agent="tester", team="t1"):
+    """Point the prompts module at a throwaway TasksDB and render the block.
+
+    _my_tasks_block swallows exceptions into "(could not load tasks: …)", so
+    without a test a bug there would silently degrade every agent's context
+    instead of failing loudly.
+    """
+    import teams_server.prompts as prompts
+    import teams_server.tasks_db as tasks_db_mod
+    from teams_server.tasks_db import TasksDB
+
+    db = TasksDB(tmp_path / "tasks.db")
+    monkeypatch.setattr(tasks_db_mod, "task_db", db)
+    return db, lambda: prompts._my_tasks_block(team, agent)
+
+
+def test_my_tasks_block_empty(tmp_path, monkeypatch):
+    _db, render = _tasks_block(tmp_path, monkeypatch)
+    assert render() == "(no open tasks.)"
+
+
+def test_my_tasks_block_splits_owed_from_delegated(tmp_path, monkeypatch):
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    db.create_task("write the docs", created_by="lead", assigned_to="tester",
+                   team_id="t1")
+    db.create_task("review the PR", created_by="tester", assigned_to="peer",
+                   team_id="t1")
+    out = render()
+
+    assert "ASSIGNED TO YOU" in out and "write the docs" in out
+    assert "YOU ASSIGNED" in out and "review the PR" in out
+    # the block must teach the one-call close-out, not a second message
+    assert "mark_task_complete" in out
+    assert "do NOT ping them for status" in out
+
+
+def test_my_tasks_block_hides_finished_work(tmp_path, monkeypatch):
+    """Outstanding work, not a growing history."""
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    done = db.create_task("old thing", created_by="lead", assigned_to="tester",
+                          team_id="t1")
+    db.set_status(done["id"], "done")
+    db.create_task("live thing", created_by="lead", assigned_to="tester",
+                   team_id="t1")
+    out = render()
+    assert "live thing" in out
+    assert "old thing" not in out
+
+
+def test_my_tasks_block_surfaces_progress_and_blockers(tmp_path, monkeypatch):
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    prog = db.create_task("in flight", created_by="lead", assigned_to="tester",
+                          team_id="t1")
+    stuck = db.create_task("wedged", created_by="lead", assigned_to="tester",
+                           team_id="t1")
+    db.update_progress(prog["id"], 40)
+    db.set_status(stuck["id"], "blocked", blocked_reason="need SMTP creds")
+    out = render()
+    assert "40%" in out
+    assert "BLOCKED: need SMTP creds" in out
+
+
+def test_my_tasks_block_lists_self_assigned_once(tmp_path, monkeypatch):
+    """A task you gave yourself is work you owe, not work you're awaiting."""
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    db.create_task("my own todo", created_by="tester", assigned_to="tester",
+                   team_id="t1")
+    out = render()
+    assert out.count("my own todo") == 1
+    assert "ASSIGNED TO YOU" in out
+    assert "YOU ASSIGNED" not in out
+
+
+def test_my_tasks_block_is_scoped_to_the_agent_and_team(tmp_path, monkeypatch):
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    db.create_task("someone else's", created_by="lead", assigned_to="other",
+                   team_id="t1")
+    db.create_task("other team's", created_by="lead", assigned_to="tester",
+                   team_id="t2")
+    assert render() == "(no open tasks.)"
+
+
+def test_my_tasks_block_flags_stale_items(tmp_path, monkeypatch):
+    """Same >2h signal the delegation ledger uses, so a stuck task is visibly
+    stuck rather than silently rotting in the list."""
+    import sqlite3
+
+    db, render = _tasks_block(tmp_path, monkeypatch)
+    t = db.create_task("ancient", created_by="lead", assigned_to="tester",
+                       team_id="t1")
+    with sqlite3.connect(str(db.db_path)) as conn:
+        conn.execute("UPDATE tasks SET created_at=? WHERE id=?",
+                     (time.time() - 10800, t["id"]))
+        conn.commit()
+    assert "open >2h" in render()
+
+
 if __name__ == "__main__":
     import subprocess
     raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-v"]))

@@ -189,6 +189,42 @@ def test_list_tasks_respects_limit_and_order(db):
     assert limited[0]["title"] == "task-4"
 
 
+def test_list_tasks_filters_by_creator(db):
+    """Powers the "you assigned" half of the live-context block."""
+    db.create_task("from alice", created_by="alice", assigned_to="bob")
+    db.create_task("from carol", created_by="carol", assigned_to="bob")
+    mine = db.list_tasks(created_by="alice")
+    assert [t["title"] for t in mine] == ["from alice"]
+
+
+def test_list_tasks_open_only_excludes_terminal(db):
+    """The live context must show what's outstanding, not a growing history."""
+    pending = db.create_task("pending", created_by="alice", assigned_to="bob")
+    prog = db.create_task("working", created_by="alice", assigned_to="bob")
+    blocked = db.create_task("stuck", created_by="alice", assigned_to="bob")
+    done = db.create_task("finished", created_by="alice", assigned_to="bob")
+    failed = db.create_task("dead", created_by="alice", assigned_to="bob")
+    db.update_progress(prog["id"], 40)
+    db.set_status(blocked["id"], "blocked", blocked_reason="waiting")
+    db.set_status(done["id"], "done")
+    db.set_status(failed["id"], "failed")
+
+    open_titles = {t["title"] for t in db.list_tasks(open_only=True)}
+    assert open_titles == {"pending", "working", "stuck"}
+    assert pending["id"] in {t["id"] for t in db.list_tasks(open_only=True)}
+    # without the flag, everything is still visible
+    assert len(db.list_tasks()) == 5
+
+
+def test_open_only_composes_with_other_filters(db):
+    db.create_task("a", created_by="alice", assigned_to="bob", team_id="t1")
+    done = db.create_task("b", created_by="alice", assigned_to="bob", team_id="t1")
+    db.create_task("c", created_by="alice", assigned_to="carol", team_id="t1")
+    db.set_status(done["id"], "done")
+    got = db.list_tasks(team_id="t1", assigned_to="bob", open_only=True)
+    assert [t["title"] for t in got] == ["a"]
+
+
 # ---------------------------------------------------------------------------
 # 4. Edit
 # ---------------------------------------------------------------------------
