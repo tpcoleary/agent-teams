@@ -23,6 +23,7 @@ Run:  pytest tests/test_task_tools.py -v
 
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,60 @@ def test_create_task_without_parent_is_top_level(_wire):
     out = _ok(task_tools.create_task_handler(
         {"title": "x", "assigned_to": "alice"}, **_kwargs("alice")))
     assert out["task"]["parent_task_id"] is None
+
+
+def test_duplicate_create_reports_reuse(_wire):
+    first = _ok(task_tools.create_task_handler(
+        {"title": "Check deploy", "assigned_to": "bob"}, **_kwargs("alice")))
+    second = _ok(task_tools.create_task_handler(
+        {"title": "Check deploy", "assigned_to": "bob"}, **_kwargs("alice")))
+    assert "already_existed" not in first
+    assert second["already_existed"] is True
+    assert second["task"]["id"] == first["task"]["id"]
+    assert "already open" in second["message"]
+
+
+def test_duplicate_create_produces_an_identical_wake_payload(_wire, monkeypatch):
+    """The two dedup layers have to compose. create_task returning the SAME row
+    means the wake payload is byte-identical, which is exactly what the inbox's
+    identical-pending dedup keys on — so the assignee is woken once, not twice.
+
+    (A fresh uuid per call would defeat that, which is the bug the InboxQueue
+    dedup comment documents: 'a random id was embedded in the header, so two
+    identical TASK sends produced different payloads and slipped past the
+    queue's byte-identical pending-dedup — waking the recipient twice'.)
+    """
+    from teams_server.tools import _daemon_registry
+
+    bob = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "bob", bob)
+    for _ in range(2):
+        task_tools.create_task_handler(
+            {"title": "Check deploy", "assigned_to": "bob", "description": "prod"},
+            **_kwargs("alice"))
+
+    assert len(bob.ingested) == 2, "handler wakes on both calls"
+    assert bob.ingested[0] == bob.ingested[1], (
+        "payloads must be byte-identical for the inbox dedup to absorb the second")
+
+
+def test_real_inbox_absorbs_the_duplicate_wake(_wire, monkeypatch, tmp_path):
+    """End-to-end of the composition, against the real InboxQueue rather than a
+    fake: two identical create_task calls must cost the assignee ONE turn."""
+    from teams_server.inbox import InboxQueue
+    from teams_server.tools import _daemon_registry
+
+    inbox = InboxQueue(tmp_path / "bob_inbox.db")
+    monkeypatch.setitem(
+        _daemon_registry, "bob",
+        types.SimpleNamespace(ingest_task=lambda from_agent, payload:
+                              inbox.enqueue(from_agent, payload)))
+
+    for _ in range(2):
+        task_tools.create_task_handler(
+            {"title": "Check deploy", "assigned_to": "bob"}, **_kwargs("alice"))
+
+    assert inbox.get_pending_count() == 1
 
 
 # ---------------------------------------------------------------------------

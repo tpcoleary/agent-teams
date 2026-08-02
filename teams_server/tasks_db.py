@@ -100,6 +100,22 @@ class TasksDB:
         priority: int = 1,
         parent_task_id: Optional[str] = None,
     ) -> dict:
+        """Create a task, idempotent on identical OPEN work.
+
+        If the same creator already has a non-terminal task with the same title
+        for the same assignee (under the same parent), return THAT row instead
+        of inserting a twin. Two reasons this matters:
+
+        * The wake payload embeds the task id, so a duplicate insert produces a
+          byte-different payload and slips past the inbox's identical-pending
+          dedup — waking the assignee twice for one piece of work.
+        * A terminal task is deliberately NOT matched: re-creating "check the
+          deploy" after yesterday's is finished is genuinely new work.
+
+        `created_by` is part of the identity because completion reports back to
+        it — collapsing alice's and carol's same-titled tasks would leave one of
+        them never hearing an answer.
+        """
         title = (title or "").strip()
         if not title:
             raise ValueError("title is required")
@@ -108,6 +124,18 @@ class TasksDB:
         with self._lock, self._conn() as conn:
             if parent_task_id is not None and self._row(conn, parent_task_id) is None:
                 raise ValueError(f"parent_task_id '{parent_task_id}' does not exist")
+            # `IS` (not `=`) so a NULL parent matches a NULL parent.
+            existing = conn.execute(
+                "SELECT id FROM tasks WHERE created_by=? AND title=? "
+                "AND assigned_to IS ? AND parent_task_id IS ? "
+                f"AND status NOT IN ({','.join('?' * len(TERMINAL_STATUSES))}) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (created_by, title, assigned_to, parent_task_id, *TERMINAL_STATUSES),
+            ).fetchone()
+            if existing:
+                log.info("[TasksDB] Dedup: open task %s '%s' already exists for %s",
+                         existing[0][:8], title, assigned_to)
+                return self._row(conn, existing[0])
             conn.execute(
                 "INSERT INTO tasks (id, team_id, parent_task_id, title, description, "
                 "status, priority, progress, assigned_to, created_by, created_at, updated_at) "

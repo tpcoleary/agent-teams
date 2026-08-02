@@ -70,6 +70,66 @@ def test_priority_clamped_to_range(db):
 
 
 # ---------------------------------------------------------------------------
+# 1b. Creation is idempotent on identical OPEN work
+# ---------------------------------------------------------------------------
+def test_duplicate_open_task_returns_existing_row(db):
+    """The wake payload embeds the task id, so a duplicate insert would produce
+    a byte-different payload and slip past the inbox's identical-pending dedup,
+    waking the assignee twice for one piece of work."""
+    first = db.create_task("Check deploy", created_by="alice", assigned_to="bob")
+    second = db.create_task("Check deploy", created_by="alice", assigned_to="bob")
+    assert second["id"] == first["id"]
+    assert len(db.list_tasks()) == 1
+
+
+def test_dedup_ignores_terminal_tasks(db):
+    """Re-creating work after the previous one finished is genuinely new."""
+    first = db.create_task("Check deploy", created_by="alice", assigned_to="bob")
+    db.set_status(first["id"], "done")
+    second = db.create_task("Check deploy", created_by="alice", assigned_to="bob")
+    assert second["id"] != first["id"]
+    assert len(db.list_tasks()) == 2
+
+
+def test_dedup_is_scoped_to_creator(db):
+    """created_by is part of a task's identity because completion reports back
+    to it — collapsing two creators' tasks would leave one never hearing back."""
+    a = db.create_task("Check deploy", created_by="alice", assigned_to="bob")
+    c = db.create_task("Check deploy", created_by="carol", assigned_to="bob")
+    assert a["id"] != c["id"]
+
+
+def test_dedup_is_scoped_to_assignee_and_parent(db):
+    a = db.create_task("Write tests", created_by="alice", assigned_to="bob")
+    b = db.create_task("Write tests", created_by="alice", assigned_to="carol")
+    assert a["id"] != b["id"]
+    # same title+assignee but filed under a different parent is distinct work
+    parent = db.create_task("Epic", created_by="alice", assigned_to="alice")
+    nested = db.create_task("Write tests", created_by="alice", assigned_to="bob",
+                             parent_task_id=parent["id"])
+    assert nested["id"] != a["id"]
+
+
+def test_dedup_matches_on_null_parent(db):
+    """`IS` not `=`, so two parentless tasks actually compare equal."""
+    a = db.create_task("t", created_by="alice", assigned_to="bob")
+    b = db.create_task("t", created_by="alice", assigned_to="bob")
+    assert a["id"] == b["id"]
+    assert a["parent_task_id"] is None
+
+
+def test_dedup_reuses_blocked_and_in_progress_tasks(db):
+    """Only terminal states are exempt — an in-flight or blocked task is still
+    the same open work."""
+    for status in ("in_progress", "blocked"):
+        d = TasksDB(db.db_path.parent / f"dedup_{status}.db")
+        first = d.create_task("t", created_by="alice", assigned_to="bob")
+        d.set_status(first["id"], status, blocked_reason="x")
+        second = d.create_task("t", created_by="alice", assigned_to="bob")
+        assert second["id"] == first["id"], status
+
+
+# ---------------------------------------------------------------------------
 # 2. Parent reference (flat, optional — not a subtask tree)
 # ---------------------------------------------------------------------------
 def test_create_task_with_parent_reference(db):

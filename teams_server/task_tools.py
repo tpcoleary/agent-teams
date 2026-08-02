@@ -347,6 +347,7 @@ def create_task_handler(args: dict, **kwargs) -> str:
     if parent_task_id and task_db.get_task(parent_task_id) is None:
         return _err(f"Parent task '{parent_task_id}' not found.")
     team_id = cfg["agents"].get(caller, {}).get("team_id")
+    before = time.time()
     try:
         task = task_db.create_task(
             title, created_by=caller, assigned_to=assignee,
@@ -355,6 +356,24 @@ def create_task_handler(args: dict, **kwargs) -> str:
         )
     except ValueError as e:
         return _err(str(e))
+    # A task older than this call means create_task deduped onto existing open
+    # work rather than inserting a twin.
+    deduped = float(task.get("created_at") or 0) < before
+    if deduped:
+        log.info("[create_task] %s re-requested existing open task %s",
+                 caller, task["id"][:8])
+        # Still wake: the payload is byte-identical to the first wake, so the
+        # inbox's identical-pending dedup absorbs it if that wake is unread,
+        # and re-delivers if the assignee already drained it.
+        woken = _wake_assignee(assignee, caller, task)
+        return json.dumps({
+            "success": True, "task": task, "already_existed": True,
+            "assignee_woken": woken,
+            "message": (
+                f"'{title}' is already open and assigned to {assignee} — reusing "
+                f"that task instead of creating a duplicate."
+            ),
+        })
     log.info("[create_task] %s created '%s' -> %s", caller, title, assignee)
     _emit("created", task, caller)
     woken = _wake_assignee(assignee, caller, task)
