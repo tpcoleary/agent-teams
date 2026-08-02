@@ -753,6 +753,21 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
         known = list(_daemon_registry.keys())
         return json.dumps({"success": False, "error": f"Unknown agent '{to_agent}'. Known: {known}"})
 
+    # Self-messaging is never a link problem, so don't report it as one: the
+    # peer_allowed() check below would deny it as "not in allowed_peers" (it is
+    # False for x->x by definition), which reads as a permissions bug and sent
+    # agents hunting for a config fix. It usually means the agent thinks it owes
+    # a report on work it assigned to itself, where nobody is waiting.
+    if to_agent == caller:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "You cannot message yourself. If you were trying to report on a "
+                "task you created for yourself, there is no delegator waiting — "
+                "just call mark_task_complete(task_id=…) and finish your turn."
+            ),
+        })
+
     if not peer_allowed(cfg, caller, to_agent):
         caller_team = cfg["agents"].get(caller, {}).get("team_id", "?")
         target_team = cfg["agents"].get(to_agent, {}).get("team_id", "?")

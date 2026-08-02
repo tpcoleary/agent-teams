@@ -1456,6 +1456,10 @@ class AgentDaemon:
                 if str(t.get("payload") or "").lstrip().startswith(
                     ("[TASK", "[QUESTION"))
                 and t.get("from_agent") not in ("turn-guard", "autonomous")
+                # A task an agent assigned to ITSELF has no delegator waiting on
+                # a RESULT. Nudging here made agents try to message themselves,
+                # which fails as a link_violation (peer_allowed(x, x) is False).
+                and t.get("from_agent") != self.name
             ]
             if delegated and "send_peer_message" not in tool_names:
                 for t in delegated:

@@ -90,8 +90,12 @@ def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
     on it — a task nobody is woken for is just a row in a table. Returns False
     if that agent has no running daemon (the task is still recorded).
 
-    Self-assignment is delivered too: the caller is mid-turn now, so this lands
-    as its next turn's work rather than being silently dropped.
+    Self-assignment is delivered too (the caller is mid-turn now, so this lands
+    as its next turn's work) but deliberately does NOT use the "[TASK · from X]"
+    header: that header means "a delegator is waiting for a RESULT", and the
+    turn-guard nudges on it. On a self-assigned task there is no delegator, so
+    that header made agents try to message themselves — which surfaced as a
+    bogus link_violation, since peer_allowed(x, x) is False by definition.
     """
     from teams_server.tools import _daemon_registry
 
@@ -101,12 +105,16 @@ def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
     body = task["title"]
     if task.get("description"):
         body += f"\n{task['description']}"
-    payload = (
-        f"[TASK · id={task['id'][:8]} · from {caller}]\n{body}\n\n"
-        f"When you're done, call mark_task_complete(task_id=\"{task['id']}\"). "
-        f"Report partial progress with update_task_progress, or "
-        f"mark_task_blocked(reason=…) if you can't proceed."
+    close_out = (
+        f"When you're done, call mark_task_complete(task_id=\"{task['id']}\") — "
+        f"that reports back to whoever created the task, so you do not need to "
+        f"message them separately. Report partial progress with "
+        f"update_task_progress, or mark_task_blocked(reason=…) if you can't proceed."
     )
+    if assignee == caller:
+        payload = f"[OWN TASK · id={task['id'][:8]}]\n{body}\n\n{close_out}"
+    else:
+        payload = f"[TASK · id={task['id'][:8]} · from {caller}]\n{body}\n\n{close_out}"
     try:
         target.ingest_task(from_agent=caller, payload=payload)
         return True

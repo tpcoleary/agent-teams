@@ -202,6 +202,98 @@ def test_no_nudge_when_result_was_sent():
     assert f.ingested == []
 
 
+def test_self_assigned_task_is_not_nudged_for_a_result():
+    """A task an agent assigned to ITSELF has no delegator waiting on a RESULT.
+
+    Regression: once create_task began waking the assignee, a self-assigned task
+    landed in the agent's own inbox looking like a delegation. The nudge fired,
+    the agent dutifully tried to report to "the delegator" — itself — and that
+    was denied as a link_violation, since peer_allowed(x, x) is False. The turn
+    ended in confusion instead of a resolved report.
+    """
+    for payload in (
+        "[OWN TASK · id=88d3de5d] print hi from researcher",
+        # Even with a delegation-shaped header, from_agent == self is decisive.
+        "[TASK · id=88d3de5d · from w1] print hi from researcher",
+    ):
+        f = GuardFake()
+        tasks = [{"id": "q1", "from_agent": "w1", "payload": payload}]
+        f._apply_turn_output_guards(tasks, _turn(tools=("terminal",)))
+        assert not any("WITHOUT A RESULT" in p for _, p in f.ingested), payload
+
+
+def test_peer_delegated_task_still_nudged():
+    """The self-assignment carve-out must not swallow real delegations."""
+    f = GuardFake()
+    tasks = [{"id": "q1", "from_agent": "founder2", "payload": TASK_PAYLOAD}]
+    f._apply_turn_output_guards(tasks, _turn(tools=("terminal",)))
+    assert any("WITHOUT A RESULT" in p for _, p in f.ingested)
+
+
+# ---------------------------------------------------------------------------
+# Self-messaging is not a link problem
+# ---------------------------------------------------------------------------
+SELF_MSG_CFG = {
+    "agents": {
+        "w1": {"team_id": "t1", "allowed_peers": ["w2"]},
+        "w2": {"team_id": "t1", "allowed_peers": ["w1"]},
+    }
+}
+
+
+@pytest.fixture()
+def _peer_msg_env(monkeypatch):
+    import teams_server.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_agents_config", lambda: SELF_MSG_CFG)
+    monkeypatch.setattr(tools_mod, "monitor_db", NullDB())
+    monkeypatch.setattr(tools_mod, "_broadcast", lambda *a, **k: None)
+    for name in ("w1", "w2"):
+        monkeypatch.setitem(tools_mod._daemon_registry, name,
+                            types.SimpleNamespace(ingest_task=lambda **k: "t1"))
+
+
+def test_self_message_is_rejected_as_such_not_as_a_link_violation(_peer_msg_env):
+    """peer_allowed(x, x) is False, so a self-message used to come back as
+    "not in allowed_peers" — which reads as a config/permissions bug and sent
+    agents hunting for a fix that doesn't exist. Name the real problem."""
+    import json
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w1", "message": "status?"}, task_id="agent_name:w1"))
+    assert out["success"] is False
+    assert "cannot message yourself" in out["error"]
+    assert "allowed_peers" not in out["error"]
+    # and it points at what the agent probably meant to do instead
+    assert "mark_task_complete" in out["error"]
+
+
+def test_real_link_violation_still_reported_as_one(_peer_msg_env, monkeypatch):
+    """The self-check must not mask genuine unlinked-peer denials."""
+    import json
+
+    monkeypatch.setitem(tools_mod._daemon_registry, "stranger",
+                        types.SimpleNamespace(ingest_task=lambda **k: "t1"))
+    monkeypatch.setitem(SELF_MSG_CFG["agents"], "stranger",
+                        {"team_id": "t1", "allowed_peers": []})
+    try:
+        out = json.loads(tools_mod._send_peer_message_handler(
+            {"to_agent": "stranger", "message": "hi"}, task_id="agent_name:w1"))
+        assert out["success"] is False
+        assert "denied" in out["error"]
+    finally:
+        SELF_MSG_CFG["agents"].pop("stranger", None)
+
+
+def test_normal_peer_message_still_succeeds(_peer_msg_env):
+    import json
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "hi", "kind": "STATUS"},
+        task_id="agent_name:w1"))
+    assert out["success"] is True
+
+
 def test_notification_turns_exempt_from_text_only_guard():
     for payload, src in (
         ("[IDLE HEARTBEAT — automated check-in…]", "autonomous"),
