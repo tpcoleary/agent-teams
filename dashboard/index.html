@@ -1647,8 +1647,11 @@ function renderAgents() {
             : '';
         const cr = (a.config?.crons || []).filter(c => c.enabled !== false).length;
         // Always-visible status word + the most useful at-a-glance facts.
-        const stLabel = st === 'busy' ? 'working' : st === 'asking_human' ? 'asking' : st === 'paused' ? 'paused' : 'idle';
-        const stColor = st === 'busy' ? 'var(--busy)' : st === 'asking_human' ? 'var(--human)' : st === 'paused' ? 'var(--danger)' : 'var(--idle)';
+        // 'degraded' must never fall through to 'idle': the whole point of the
+        // state is that a held-for-outage agent looks different from one that
+        // has simply finished its work.
+        const stLabel = st === 'busy' ? 'working' : st === 'asking_human' ? 'asking' : st === 'paused' ? 'paused' : st === 'degraded' ? 'degraded' : 'idle';
+        const stColor = st === 'busy' ? 'var(--busy)' : st === 'asking_human' ? 'var(--human)' : st === 'paused' ? 'var(--danger)' : st === 'degraded' ? 'var(--danger)' : 'var(--idle)';
         const sub = [
             `<span class="cflag mono" title="Model">${esc(a.config?.model || 'default')}</span>`,
             ctxPct != null
@@ -1938,7 +1941,7 @@ function renderQueues() {
         const q = a.pending_count || 0, pct = (q/max)*100;
         const color = q>0 ? 'var(--accent)' : 'var(--idle)';
         // Delivery is event-driven now, so there's no countdown — show live state.
-        const timerText = a.state === 'busy' ? 'working' : (a.state === 'asking_human' ? 'asking' : '');
+        const timerText = a.state === 'busy' ? 'working' : (a.state === 'asking_human' ? 'asking' : (a.state === 'degraded' ? 'provider down' : ''));
         return `<div class="queue-bar-row" role="button" tabindex="0" style="cursor:pointer" title="View this agent's tasks" onclick="showTasks('${jsAttr(n)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTasks('${jsAttr(n)}')}"><div class="queue-bar-label">${esc(n)}</div><div class="queue-bar-track"><div class="queue-bar-fill" style="width:${pct}%;background:${color}"></div></div><div style="font-size:10px;color:var(--text-muted);min-width:36px;text-align:right">${timerText}</div><div class="queue-bar-count">${q}</div></div>`;
     }).join('');
 }

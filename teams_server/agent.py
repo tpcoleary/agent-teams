@@ -77,6 +77,11 @@ AGENT_STATE_IDLE = "idle"
 AGENT_STATE_BUSY = "busy"
 AGENT_STATE_ASKING_HUMAN = "asking_human"
 AGENT_STATE_PAUSED = "paused"
+# Held because the LLM provider is unreachable — NOT the same as idle. An
+# outage used to leave the agent sitting in "idle", which looks identical to
+# "finished its work and waiting", so a 9-hour provider outage was invisible on
+# the dashboard until a human happened to notice and paused the agent by hand.
+AGENT_STATE_DEGRADED = "degraded"
 
 # Stable substring of every task-prompt preamble. Used to locate this turn's
 # output boundary in the returned message list (see _process_tasks_batch), so it
@@ -88,6 +93,17 @@ _TASK_PROMPT_MARKER = "new message(s) to process"
 # spin the sweep loop; capped so recovery is still picked up promptly.
 INFRA_RETRY_BACKOFF_BASE_SECONDS = 15.0
 INFRA_RETRY_BACKOFF_MAX_SECONDS = 300.0
+
+# Circuit breaker for a sustained provider outage. After this many CONSECUTIVE
+# infra failures we stop treating each attempt as a fresh error worth reporting:
+# the circuit opens, ONE alert is emitted, the agent goes visibly `degraded`, and
+# retries settle onto a fixed slow probe cadence until the provider answers.
+#
+# Without this, a real outage produced one error event per attempt for as long as
+# it lasted (23 events over 9 hours in the observed run) with no single
+# actionable signal, and every one of them said the same thing.
+INFRA_CIRCUIT_OPEN_AFTER = 3
+INFRA_CIRCUIT_PROBE_SECONDS = 300.0
 
 # How long a stop waits for an interrupted turn's worker thread to unwind before
 # giving up and proceeding. interrupt() only lands at the next tool boundary, so
@@ -471,6 +487,8 @@ class AgentDaemon:
         # draining until this wall-clock time; the wait grows per consecutive miss.
         self._infra_hold_until = 0.0
         self._infra_misses = 0
+        self._infra_circuit_open = False
+        self._infra_outage_started_at = 0.0
         # Per-agent sweep interval (falls back to the global default). Lets the UI
         # tune how often a specific agent polls its queue.
         self._sweep_interval = self._resolve_sweep_interval(cfg)
@@ -627,6 +645,7 @@ class AgentDaemon:
             return False
         return any(s in e for s in (
             "connection error", "apiconnection", "connection refused",
+            "connection reset",
             "billing or credits", "credits exhausted", "timeout", "timed out",
             "max retries", "failed after", "service unavailable", "502", "503", "504",
             "rate limit", "overloaded", "temporarily unavailable", "econnreset",
@@ -1093,7 +1112,10 @@ class AgentDaemon:
             self._pause_reason = ""
             self._paused_by = ""
             self._ai_agent = None
-            self.state = AGENT_STATE_IDLE
+            # Not necessarily idle: a stop resets this agent's WORK, but it does
+            # nothing about an unreachable provider, so keep showing degraded
+            # while the circuit is open.
+            self.state = self._resting_state()
             self.next_sweep_at = time.time() + self._sweep_interval
         self._emit_state_change()
 
@@ -1169,7 +1191,7 @@ class AgentDaemon:
             prev_reason = self._pause_reason
             self._pause_reason = ""
             self._paused_by = ""
-            self.state = AGENT_STATE_IDLE
+            self.state = self._resting_state()
         self._emit_state_change()
         # asyncio.Event is not thread-safe — set it on the owning loop thread.
         try:
@@ -1303,7 +1325,7 @@ class AgentDaemon:
             with self._lock:
                 # If a pause landed mid-turn, the interrupted turn unwinds into
                 # here — honor the freeze instead of flipping back to idle.
-                self.state = AGENT_STATE_PAUSED if self._paused else AGENT_STATE_IDLE
+                self.state = self._resting_state()
                 self.next_sweep_at = time.time() + self._sweep_interval
             self._emit_state_change()
             # More queued while we were busy? Wake immediately rather than wait
@@ -1317,6 +1339,60 @@ class AgentDaemon:
                     self._wake.set()
             except Exception:
                 pass
+
+    def _note_turn_failure(self, err: str) -> Dict[str, Any]:
+        """Record one failed turn and decide how loudly to report it.
+
+        Pure bookkeeping — no I/O — so the outage policy is unit-testable
+        without standing up a provider or a full batch run. Returns
+        {infra, report, newly_opened}.
+        """
+        infra = self._is_infra_failure(err)
+        newly_opened = False
+        if infra:
+            self._infra_misses += 1
+            if not self._infra_outage_started_at:
+                self._infra_outage_started_at = time.time()
+            if (not self._infra_circuit_open
+                    and self._infra_misses >= INFRA_CIRCUIT_OPEN_AFTER):
+                self._infra_circuit_open = True
+                newly_opened = True
+        else:
+            # A task-caused failure says nothing about provider health, so it
+            # must never count toward opening the circuit.
+            self._infra_misses = 0
+        # Report every non-infra failure, every infra failure before the circuit
+        # opens, and the opening itself — then go quiet. Repeating one identical
+        # message per attempt is what buried the signal in the observed outage.
+        report = (not infra) or (not self._infra_circuit_open) or newly_opened
+        return {"infra": infra, "report": report, "newly_opened": newly_opened}
+
+    def _infra_backoff_seconds(self) -> float:
+        """Below the circuit threshold, back off exponentially so a brief blip
+        recovers fast. Once open, settle onto a fixed slow probe rather than
+        growing unboundedly, so recovery is still noticed promptly hours in."""
+        if self._infra_circuit_open:
+            return INFRA_CIRCUIT_PROBE_SECONDS
+        return min(
+            INFRA_RETRY_BACKOFF_BASE_SECONDS * (2 ** max(0, self._infra_misses - 1)),
+            INFRA_RETRY_BACKOFF_MAX_SECONDS,
+        )
+
+    def _resting_state(self) -> str:
+        """What this agent should show when it isn't mid-turn.
+
+        Precedence is deliberate: an explicit human pause outranks a degraded
+        circuit (the operator's intent is the more important fact), and both
+        outrank plain idle. `degraded` exists because an outage previously left
+        the agent in `idle`, which is indistinguishable from "finished its work
+        and waiting" — that ambiguity is why a 9-hour provider outage went
+        unnoticed until a human happened to look.
+        """
+        if self._paused:
+            return AGENT_STATE_PAUSED
+        if self._infra_circuit_open:
+            return AGENT_STATE_DEGRADED
+        return AGENT_STATE_IDLE
 
     def _budget_blocked(self) -> bool:
         """True when this agent's team is over its daily spend cap. Cheap
@@ -2241,10 +2317,27 @@ class AgentDaemon:
             self._persist_session_id_if_rotated()
 
             # The turn produced a response (provider is reachable) — clear any
-            # infra-outage backoff so subsequent work runs at the normal cadence.
+            # infra-outage backoff so subsequent work runs at the normal cadence,
+            # and close the circuit breaker with ONE recovery notice.
             if not response.get("failed"):
+                if self._infra_circuit_open:
+                    outage_for = time.time() - (self._infra_outage_started_at or time.time())
+                    log.warning("[%s] Provider recovered after %.1f min — closing circuit",
+                                self.name, outage_for / 60.0)
+                    monitor_db.log_event(
+                        self.name, "provider_recovered",
+                        data={"outage_seconds": round(outage_for),
+                              "failed_attempts": self._infra_misses},
+                    )
+                    _broadcast("provider_recovered", {
+                        "agent_name": self.name,
+                        "outage_seconds": round(outage_for),
+                        "timestamp": time.time(),
+                    })
                 self._infra_misses = 0
                 self._infra_hold_until = 0.0
+                self._infra_circuit_open = False
+                self._infra_outage_started_at = 0.0
 
             # A hard LLM failure (proxy down, billing exhausted, repeated stream
             # drops) does NOT raise — Hermes returns failed=True with an empty or
@@ -2255,13 +2348,27 @@ class AgentDaemon:
             if response.get("failed"):
                 err = str(response.get("error") or response.get("final_response") or "LLM call failed")
                 log.error("[%s] LLM turn failed (no response produced): %s", self.name, err[:200])
-                infra = self._is_infra_failure(err)
-                # Surface it in the UI, but throttle during a sustained outage so
-                # we don't spam the monitoring log with one error per 10s tick.
+                # Classify + update the circuit BEFORE reporting: once the
+                # circuit is open every further attempt repeats the same
+                # message, which is how one 9-hour outage produced 23 identical
+                # error events with no single actionable signal among them.
+                outcome = self._note_turn_failure(err)
+                infra = outcome["infra"]
+                newly_opened = outcome["newly_opened"]
+                report = outcome["report"]
+
                 now = time.time()
-                if now - self._last_llm_error_emit >= LLM_ERROR_EMIT_THROTTLE_SECONDS:
+                if report and now - self._last_llm_error_emit >= LLM_ERROR_EMIT_THROTTLE_SECONDS:
                     self._last_llm_error_emit = now
-                    if infra:
+                    if newly_opened:
+                        err_content = (
+                            f"🔌 LLM provider unreachable after {self._infra_misses} "
+                            f"attempts — holding ALL work and probing every "
+                            f"{int(INFRA_CIRCUIT_PROBE_SECONDS / 60)} min until it "
+                            f"answers. This agent is DEGRADED, not idle. Nothing is "
+                            f"lost; work resumes automatically. Detail: {err}"
+                        )
+                    elif infra:
                         err_content = (
                             f"⚠️ LLM provider unreachable — turn produced no response. "
                             f"Holding work until it recovers (auto-resumes). Detail: {err}"
@@ -2276,29 +2383,38 @@ class AgentDaemon:
                         "task_id": task_preview,
                         "timestamp": time.time(),
                     })
-                monitor_db.log_event(
-                    self.name, "error",
-                    data={"error": err[:500], "task_ids": task_ids,
-                          "kind": "llm_infra" if infra else "llm_failure"},
-                )
-                _broadcast("error", {
-                    "agent_name": self.name,
-                    "task_ids": task_ids,
-                    "error": err[:500],
-                    "timestamp": time.time(),
-                })
-                if infra:
-                    # Not the task's fault — wait for recovery without burning the
-                    # retry budget. Set an exponential hold so the sweep's
-                    # "more pending? wake now" path doesn't re-attempt instantly
-                    # and spin against a down provider; the loop re-checks when the
-                    # hold expires, so work still resumes promptly once it's back.
-                    self._infra_misses += 1
-                    backoff = min(
-                        INFRA_RETRY_BACKOFF_BASE_SECONDS * (2 ** (self._infra_misses - 1)),
-                        INFRA_RETRY_BACKOFF_MAX_SECONDS,
+                if report:
+                    monitor_db.log_event(
+                        self.name, "error",
+                        data={"error": err[:500], "task_ids": task_ids,
+                              "kind": "llm_infra" if infra else "llm_failure"},
                     )
-                    self._infra_hold_until = time.time() + backoff
+                    _broadcast("error", {
+                        "agent_name": self.name,
+                        "task_ids": task_ids,
+                        "error": err[:500],
+                        "timestamp": time.time(),
+                    })
+                if newly_opened:
+                    # THE actionable signal for a sustained outage — one event per
+                    # outage, not one per attempt.
+                    monitor_db.log_event(
+                        self.name, "provider_outage",
+                        data={"error": err[:500], "failed_attempts": self._infra_misses,
+                              "probe_seconds": INFRA_CIRCUIT_PROBE_SECONDS},
+                    )
+                    _broadcast("provider_outage", {
+                        "agent_name": self.name,
+                        "error": err[:500],
+                        "failed_attempts": self._infra_misses,
+                        "timestamp": time.time(),
+                    })
+                if infra:
+                    # Not the task's fault — wait for recovery without burning
+                    # the retry budget (requeue_no_penalty), holding the batch so
+                    # the sweep's "more pending? wake now" path doesn't spin
+                    # against a down provider.
+                    self._infra_hold_until = time.time() + self._infra_backoff_seconds()
                     self.inbox.requeue_no_penalty(task_ids)
                     log.warning("[%s] Held %d task(s) for provider recovery (no penalty)",
                                 self.name, len(task_ids))
