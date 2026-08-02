@@ -352,12 +352,17 @@ DIRECTIVE_HEARTBEAT_PROMPT = (
 MISSING_RESULT_NUDGE = (
     "[TURN ENDED WITHOUT A RESULT — task {task_id} from {from_agent}]\n"
     "Your last turn on this task ended (iteration budget or stop) without "
-    "sending ANY message back. The delegator cannot see your conversation — "
-    "only send_peer_message delivers. Send ONE concise status RESULT now:\n"
-    "  send_peer_message(to_agent=\"{from_agent}\", kind=\"RESULT\", "
+    "reporting back. The delegator cannot see your conversation — only a "
+    "delivered report reaches them. Do ONE of these now, then stop:\n"
+    "  • If this is a tracked task (you have its task_id): "
+    "mark_task_complete(task_id=\"{task_id}\", summary=<DONE: …>) — this reports "
+    "to the creator for you. Use mark_task_blocked(task_id=…, reason=…) if "
+    "you're stuck.\n"
+    "  • Otherwise: send_peer_message(to_agent=\"{from_agent}\", kind=\"RESULT\", "
     "reply_to=\"{task_id}\", message=<DONE: …  REMAINING: …  NEXT: …>)\n"
-    "If the work is incomplete, say exactly what remains — a partial status is "
-    "infinitely better than silence. Do nothing else this turn."
+    "Do NOT do both — that reports the same work twice. If the work is "
+    "incomplete, say exactly what remains: a partial status is infinitely "
+    "better than silence. Do nothing else this turn."
 )
 
 # Injected ONCE (cooldown-limited) when the daemon's repetition guard sees the

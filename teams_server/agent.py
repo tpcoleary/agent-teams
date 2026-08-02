@@ -1461,7 +1461,7 @@ class AgentDaemon:
                 # which fails as a link_violation (peer_allowed(x, x) is False).
                 and t.get("from_agent") != self.name
             ]
-            if delegated and "send_peer_message" not in tool_names:
+            if delegated and not (set(tool_names) & self._STATUS_HANDOFF_TOOLS):
                 for t in delegated:
                     m = re.search(r"id=([0-9a-fA-F-]{6,})",
                                   str(t.get("payload") or ""))
@@ -1548,6 +1548,16 @@ class AgentDaemon:
         "read_file", "read_files", "search_files", "web_search", "web_extract",
         "get_self_config", "list_files", "list_dir", "grep", "glob", "ls",
         "todo", "memory", "get_messages",
+    }
+
+    # Tools that deliver a report to whoever is waiting. send_peer_message does
+    # it explicitly; mark_task_complete/blocked do it as part of setting the
+    # status (see task_tools._notify_creator). Any of them satisfies the
+    # missing-RESULT guard — nudging after mark_task_complete would ask the agent
+    # to report work it has already reported, and re-reporting wakes the
+    # delegator twice for one piece of work.
+    _STATUS_HANDOFF_TOOLS = {
+        "send_peer_message", "mark_task_complete", "mark_task_blocked",
     }
 
     @staticmethod

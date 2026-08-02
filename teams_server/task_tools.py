@@ -85,10 +85,27 @@ def _emit(event: str, task: dict, caller: str, **extra) -> None:
     _broadcast(f"task_{event}", {**task, "timestamp": time.time(), **extra})
 
 
+def _deliver(to_agent: str, from_agent: str, payload: str) -> bool:
+    """Put a payload in an agent's inbox, waking it. False if that agent has no
+    running daemon or its inbox rejected the write — never raises, because a
+    delivery problem must not fail the task operation that triggered it (the
+    task row is already the durable record)."""
+    from teams_server.tools import _daemon_registry
+
+    target = _daemon_registry.get(to_agent)
+    if target is None:
+        return False
+    try:
+        target.ingest_task(from_agent=from_agent, payload=payload)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[task] could not deliver to '%s': %s", to_agent, exc)
+        return False
+
+
 def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
     """Deliver the task into the assignee's inbox so it actually WAKES and works
-    on it — a task nobody is woken for is just a row in a table. Returns False
-    if that agent has no running daemon (the task is still recorded).
+    on it — a task nobody is woken for is just a row in a table.
 
     Self-assignment is delivered too (the caller is mid-turn now, so this lands
     as its next turn's work) but deliberately does NOT use the "[TASK · from X]"
@@ -97,30 +114,42 @@ def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
     that header made agents try to message themselves — which surfaced as a
     bogus link_violation, since peer_allowed(x, x) is False by definition.
     """
-    from teams_server.tools import _daemon_registry
-
-    target = _daemon_registry.get(assignee)
-    if target is None:
-        return False
     body = task["title"]
     if task.get("description"):
         body += f"\n{task['description']}"
     close_out = (
-        f"When you're done, call mark_task_complete(task_id=\"{task['id']}\") — "
-        f"that reports back to whoever created the task, so you do not need to "
-        f"message them separately. Report partial progress with "
-        f"update_task_progress, or mark_task_blocked(reason=…) if you can't proceed."
+        f"When you're done, call mark_task_complete(task_id=\"{task['id']}\", "
+        f"summary=\"…\") — that reports back to whoever created the task, so you "
+        f"do NOT need to send them a separate message. Report partial progress "
+        f"with update_task_progress, or mark_task_blocked(reason=…) if you're stuck."
     )
     if assignee == caller:
         payload = f"[OWN TASK · id={task['id'][:8]}]\n{body}\n\n{close_out}"
     else:
         payload = f"[TASK · id={task['id'][:8]} · from {caller}]\n{body}\n\n{close_out}"
-    try:
-        target.ingest_task(from_agent=caller, payload=payload)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[task] could not wake '%s': %s", assignee, exc)
-        return False
+    return _deliver(assignee, caller, payload)
+
+
+def _notify_creator(task: dict, caller: str, *, outcome: str, detail: str) -> bool:
+    """Report a terminal/blocking outcome to whoever created the task.
+
+    This is what makes the task the ONLY thing an agent has to remember: setting
+    a status IS reporting it. Previously an agent could complete work and still
+    leave its delegator waiting, because the report was a separate
+    send_peer_message call it had to remember to make — and the turn-guard nudge
+    was the only thing catching it when it didn't.
+
+    Returns False when there is nobody to tell (self-created task) or the creator
+    has no running daemon. Never raises.
+    """
+    creator = task.get("created_by")
+    if not creator or creator == task.get("assigned_to"):
+        return False  # self-assigned: no delegator is waiting
+    payload = (
+        f"[RESULT · from {caller} · re {task['id'][:8]}]\n"
+        f"{outcome}: {task.get('title')}\n{detail}"
+    )
+    return _deliver(creator, caller, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +257,24 @@ MARK_TASK_COMPLETE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "mark_task_complete",
-        "description": "Mark a task assigned to you as done (sets progress to 100). Assignee-only.",
+        "description": (
+            "Mark a task assigned to you as done (sets progress to 100) AND "
+            "report the outcome back to whoever created it. Assignee-only. This "
+            "is the ONLY thing you need to do to close out delegated work — do "
+            "not also send_peer_message a RESULT, that would report it twice."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"task_id": {"type": "string"}},
+            "properties": {
+                "task_id": {"type": "string"},
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "What you actually did/found — this is the text the "
+                        "creator receives, so make it self-contained."
+                    ),
+                },
+            },
             "required": ["task_id"],
         },
     },
@@ -390,12 +433,39 @@ def mark_task_complete_handler(args: dict, **kwargs) -> str:
     task, own_error = _load_owned_task(task_id, caller, assignee_only=True)
     if own_error:
         return _err(own_error)
-    from teams_server.tasks_db import STATUS_DONE
+    from teams_server.tasks_db import STATUS_DONE, TERMINAL_STATUSES
+
+    summary = (args.get("summary") or "").strip()
+    # Idempotent: completing an already-terminal task must not re-report it.
+    # The turn-guard could otherwise drive a second call (see the 12:52 run,
+    # where one completion produced two RESULTs) and the delegator would be
+    # woken twice for one piece of work.
+    if task.get("status") in TERMINAL_STATUSES:
+        return json.dumps({
+            "success": True, "task": task, "already_complete": True,
+            "reported_to_creator": False,
+            "message": (
+                f"Already {task['status']} — nothing further to do, and the "
+                "creator was already told. Do not report this again."
+            ),
+        })
 
     updated = task_db.set_status(task_id, STATUS_DONE)
     log.info("[mark_task_complete] %s completed %s", caller, task_id[:8])
     _emit("completed", updated, caller)
-    return json.dumps({"success": True, "task": updated})
+    reported = _notify_creator(
+        updated, caller, outcome="DONE",
+        detail=summary or "Completed (no summary given).")
+    result: Dict[str, Any] = {
+        "success": True, "task": updated, "reported_to_creator": reported,
+    }
+    result["message"] = (
+        f"Done, and '{updated['created_by']}' has been told — do NOT also send "
+        f"them a message about it."
+        if reported else
+        "Done. Nobody else is waiting on this one, so no report was sent."
+    )
+    return json.dumps(result)
 
 
 def mark_task_blocked_handler(args: dict, **kwargs) -> str:
@@ -414,7 +484,16 @@ def mark_task_blocked_handler(args: dict, **kwargs) -> str:
     updated = task_db.set_status(task_id, STATUS_BLOCKED, blocked_reason=reason)
     log.info("[mark_task_blocked] %s blocked %s: %s", caller, task_id[:8], reason[:80])
     _emit("blocked", updated, caller)
-    return json.dumps({"success": True, "task": updated})
+    # A block is exactly when the delegator most needs to hear from you — it's
+    # the case where silence looks identical to "still working".
+    reported = _notify_creator(updated, caller, outcome="BLOCKED", detail=reason)
+    return json.dumps({
+        "success": True, "task": updated, "reported_to_creator": reported,
+        "message": (
+            f"Blocked, and '{updated['created_by']}' has been told."
+            if reported else "Blocked. No creator to notify."
+        ),
+    })
 
 
 def list_my_tasks_handler(args: dict, **kwargs) -> str:

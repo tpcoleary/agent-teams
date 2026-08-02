@@ -362,7 +362,6 @@ def test_complete_by_assignee(_wire):
         {"task_id": task["id"]}, **_kwargs("bob")))
     assert out["task"]["status"] == "done"
     assert out["task"]["progress"] == 100
-    assert "message" not in out
 
 
 def test_complete_by_non_assignee_rejected(_wire):
@@ -399,6 +398,120 @@ def test_blocked_by_non_assignee_rejected(_wire):
     out = _fail(task_tools.mark_task_blocked_handler(
         {"task_id": task["id"], "reason": "x"}, **_kwargs("alice")))
     assert "assignee" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# 7b. Setting a terminal status IS reporting it
+# ---------------------------------------------------------------------------
+def test_complete_reports_to_creator(_wire, monkeypatch):
+    """Completing delegated work must deliver the report itself. Previously an
+    agent could mark a task done and still leave its delegator waiting, because
+    reporting was a separate call it had to remember."""
+    from teams_server.tools import _daemon_registry
+
+    alice = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "alice", alice)
+    task = _ok(task_tools.create_task_handler(
+        {"title": "Review PR", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
+    alice.ingested.clear()  # drop nothing; alice assigned to bob, wasn't woken
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"], "summary": "looks good, merged"}, **_kwargs("bob")))
+    assert out["reported_to_creator"] is True
+    assert len(alice.ingested) == 1
+    from_agent, payload = alice.ingested[0]
+    assert from_agent == "bob"
+    assert "RESULT" in payload
+    assert "looks good, merged" in payload
+    assert "Review PR" in payload
+    # and the agent is told not to double-report
+    assert "do NOT also send" in out["message"] or "do NOT" in out["message"]
+
+
+def test_complete_does_not_report_on_self_assigned_task(_wire, monkeypatch):
+    """No delegator is waiting on work you gave yourself — reporting there is
+    what produced the self-message link_violation."""
+    from teams_server.tools import _daemon_registry
+
+    alice = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "alice", alice)
+    task = _ok(task_tools.create_task_handler(
+        {"title": "my own todo", "assigned_to": "alice"}, **_kwargs("alice")))["task"]
+    alice.ingested.clear()  # discard the wake
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"]}, **_kwargs("alice")))
+    assert out["reported_to_creator"] is False
+    assert alice.ingested == []
+
+
+def test_completion_is_idempotent_and_reports_once(_wire, monkeypatch):
+    """The turn-guard could drive a second completion call; the delegator must
+    not be woken twice for one piece of work (observed at 12:52 as two RESULTs
+    for a single completion)."""
+    from teams_server.tools import _daemon_registry
+
+    alice = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "alice", alice)
+    task = _ok(task_tools.create_task_handler(
+        {"title": "t", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
+    alice.ingested.clear()
+
+    first = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"], "summary": "done"}, **_kwargs("bob")))
+    second = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"], "summary": "done again"}, **_kwargs("bob")))
+
+    assert first["reported_to_creator"] is True
+    assert second.get("already_complete") is True
+    assert second["reported_to_creator"] is False
+    assert len(alice.ingested) == 1, "one completion must produce exactly one report"
+
+
+def test_blocked_reports_to_creator(_wire, monkeypatch):
+    """Blocked is when the delegator most needs to hear: silence is
+    indistinguishable from 'still working'."""
+    from teams_server.tools import _daemon_registry
+
+    alice = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "alice", alice)
+    task = _ok(task_tools.create_task_handler(
+        {"title": "Deploy", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
+    alice.ingested.clear()
+
+    out = _ok(task_tools.mark_task_blocked_handler(
+        {"task_id": task["id"], "reason": "need prod credentials"}, **_kwargs("bob")))
+    assert out["reported_to_creator"] is True
+    assert "need prod credentials" in alice.ingested[0][1]
+    assert "BLOCKED" in alice.ingested[0][1]
+
+
+def test_report_delivery_failure_does_not_fail_completion(_wire, monkeypatch):
+    """The task row is the durable record — a delivery problem must not roll
+    back or error the completion."""
+    from teams_server.tools import _daemon_registry
+
+    class Boom:
+        def ingest_task(self, from_agent, payload):
+            raise RuntimeError("inbox exploded")
+
+    monkeypatch.setitem(_daemon_registry, "alice", Boom())
+    task = _ok(task_tools.create_task_handler(
+        {"title": "t", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"]}, **_kwargs("bob")))
+    assert out["task"]["status"] == "done"
+    assert out["reported_to_creator"] is False
+
+
+def test_complete_with_no_creator_daemon_still_completes(_wire):
+    task = _ok(task_tools.create_task_handler(
+        {"title": "t", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": task["id"]}, **_kwargs("bob")))
+    assert out["task"]["status"] == "done"
+    assert out["reported_to_creator"] is False
 
 
 # ---------------------------------------------------------------------------

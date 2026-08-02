@@ -143,6 +143,7 @@ class GuardFake:
     """Minimal stand-in exposing exactly what _apply_turn_output_guards uses."""
 
     _READONLY_TOOLS = AgentDaemon._READONLY_TOOLS
+    _STATUS_HANDOFF_TOOLS = AgentDaemon._STATUS_HANDOFF_TOOLS
     _apply_turn_output_guards = AgentDaemon._apply_turn_output_guards
 
     def __init__(self, is_supervisor=False):
