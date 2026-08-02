@@ -201,7 +201,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .tasks-group-label { font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 6px 0 2px; }
 .task-card { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 9px 10px; cursor: pointer; transition: border-color 0.15s; }
 .task-card:hover { border-color: var(--border-strong); }
-.task-card.sub { margin-left: 14px; border-left: 2px solid var(--border-strong); }
+.task-card-parent-ref { font-size: 10px; color: var(--text-muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-card-title { font-size: 12px; font-weight: 500; color: var(--text); word-break: break-word; }
 .task-card-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
 .task-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
@@ -1563,11 +1563,6 @@ function handleWS(msg) {
             logEvent('system', `${payload.created_by} created task '${payload.title}' → ${payload.assigned_to}`);
             if (tasksPageOpen) renderTasksPage();
             break;
-        case 'task_subtask_created':
-            tasksStore.set(payload.id, payload);
-            logEvent('system', `${payload.created_by} created subtask '${payload.title}' → ${payload.assigned_to}`);
-            if (tasksPageOpen) renderTasksPage();
-            break;
         case 'task_reassigned':
             tasksStore.set(payload.id, payload);
             logEvent('system', `Task '${payload.title}' reassigned ${payload.previous_assignee} → ${payload.assigned_to}`);
@@ -1593,7 +1588,11 @@ function handleWS(msg) {
             break;
         case 'task_deleted':
             tasksStore.delete(payload.task_id);
-            for (const id of (payload.subtask_ids || [])) tasksStore.delete(id);
+            // Server-side FK is ON DELETE SET NULL, so anything that pointed at
+            // the deleted task is now top-level — mirror that in the cache.
+            for (const t of tasksStore.values()) {
+                if (t.parent_task_id === payload.task_id) t.parent_task_id = null;
+            }
             if (tasksPageOpen) renderTasksPage();
             break;
     }
@@ -1983,8 +1982,9 @@ async function showTasks(name) {
 }
 
 /* ===== TASKS PAGE (full board — human-meaningful work items, NOT the inbox
-   drill-down above). One column per agent, subtasks nested under their
-   parent, re-rendered from tasksStore on every load + WS update. ===== */
+   drill-down above). One column per agent, grouped by status, re-rendered from
+   tasksStore on every load + WS update. parent_task_id is a flat optional
+   reference shown as a chip — not a nesting/roll-up relationship. ===== */
 let tasksStore = new Map();
 let tasksPageOpen = false;
 
@@ -2021,7 +2021,7 @@ async function loadAllTasks() {
     }
 }
 
-function taskCardHTML(t, isSub) {
+function taskCardHTML(t) {
     const s = TASK_STATUS_META[t.status] || { label: t.status || '?', color: '#8E8E96' };
     const prio = TASK_PRIORITY_LABEL[t.priority] ?? 'normal';
     const when = t.created_at ? new Date(t.created_at * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
@@ -2029,8 +2029,15 @@ function taskCardHTML(t, isSub) {
         ? `<div class="task-card-blocked-reason">⚠ ${esc(t.blocked_reason)}</div>` : '';
     const progressBar = (t.status === 'in_progress' || t.status === 'pending')
         ? `<div class="queue-bar-track"><div class="queue-bar-fill" style="width:${Math.max(0, Math.min(100, t.progress || 0))}%;background:${s.color}"></div></div>` : '';
-    return `<div class="task-card${isSub ? ' sub' : ''}" onclick="showTaskDetail('${jsAttr(t.id)}')" title="Click to edit">
+    // parent_task_id is a plain reference: show where this sits without implying
+    // the parent rolls up this task's progress.
+    const parent = t.parent_task_id ? tasksStore.get(t.parent_task_id) : null;
+    const parentRef = t.parent_task_id
+        ? `<div class="task-card-parent-ref" title="Part of a broader task">↳ ${esc(parent ? parent.title : t.parent_task_id.slice(0, 8))}</div>`
+        : '';
+    return `<div class="task-card" onclick="showTaskDetail('${jsAttr(t.id)}')" title="Click to edit">
         <div class="task-card-title">${esc(t.title)}</div>
+        ${parentRef}
         <div class="task-card-meta">
             <span class="task-status-dot" style="background:${s.color}"></span>
             <span style="font-size:10px;color:var(--text-muted)">${esc(s.label)}</span>
@@ -2049,29 +2056,16 @@ function renderTasksPage() {
     countEl.textContent = all.length ? `${all.length} task(s)` : '';
     if (!all.length) { board.innerHTML = '<div class="tasks-empty-col">No tasks yet.</div>'; return; }
 
-    const topLevel = all.filter(t => !t.parent_task_id);
-    const subsByParent = new Map();
-    for (const t of all) {
-        if (t.parent_task_id) {
-            if (!subsByParent.has(t.parent_task_id)) subsByParent.set(t.parent_task_id, []);
-            subsByParent.get(t.parent_task_id).push(t);
-        }
-    }
-
-    const agentNames = new Set([...Object.keys(agentData), ...topLevel.map(t => t.assigned_to).filter(Boolean)]);
+    const agentNames = new Set([...Object.keys(agentData), ...all.map(t => t.assigned_to).filter(Boolean)]);
     const columns = Array.from(agentNames).sort().map(name => {
-        const mine = topLevel.filter(t => t.assigned_to === name);
+        const mine = all.filter(t => t.assigned_to === name);
         if (!mine.length && !agentData[name]) return '';
         let body = '';
         for (const status of TASK_STATUS_ORDER) {
             const inGroup = mine.filter(t => t.status === status);
             if (!inGroup.length) continue;
             body += `<div class="tasks-group-label">${esc(TASK_STATUS_META[status]?.label || status)} (${inGroup.length})</div>`;
-            for (const t of inGroup) {
-                body += taskCardHTML(t, false);
-                const subs = subsByParent.get(t.id) || [];
-                for (const sub of subs) body += taskCardHTML(sub, true);
-            }
+            for (const t of inGroup) body += taskCardHTML(t);
         }
         if (!body) body = '<div class="tasks-empty-col">No tasks</div>';
         return `<div class="tasks-col">

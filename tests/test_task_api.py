@@ -5,11 +5,12 @@ Covers the human/dashboard-facing surface for the task tracker:
   * GET  /tasks                      — list with filters
   * GET  /tasks/agent/{name}         — scoped to one assignee
   * GET  /tasks/team/{team_id}       — scoped to one team
-  * GET  /tasks/{id}                 — single task + its subtasks
+  * GET  /tasks/{id}                 — single task
   * PATCH /tasks/{id}                — human edit (more permissive than the
                                         agent tools: any field, incl. status/
                                         assigned_to)
-  * DELETE /tasks/{id}               — cascades to subtasks
+  * DELETE /tasks/{id}               — removes one task; anything referencing it
+                                        as parent survives as top-level
 
 Uses FastAPI TestClient against the real app, with server_mod.task_db swapped
 for a throwaway TasksDB (tmp_path) so tests never touch the real tasks.db.
@@ -105,15 +106,19 @@ def test_list_tasks_for_team(client, db):
 # ---------------------------------------------------------------------------
 # GET /tasks/{id}
 # ---------------------------------------------------------------------------
-def test_get_task_with_subtasks(client, db):
-    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
-    db.create_task("child", created_by="alice", assigned_to="bob", parent_task_id=parent["id"])
-    r = client.get(f"/tasks/{parent['id']}")
+def test_get_task(client, db):
+    task = db.create_task("parent", created_by="alice", assigned_to="bob")
+    r = client.get(f"/tasks/{task['id']}")
     assert r.status_code == 200
-    body = r.json()
-    assert body["task"]["title"] == "parent"
-    assert len(body["subtasks"]) == 1
-    assert body["subtasks"][0]["title"] == "child"
+    assert r.json()["task"]["title"] == "parent"
+
+
+def test_get_task_exposes_parent_reference(client, db):
+    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
+    child = db.create_task("child", created_by="alice", assigned_to="bob",
+                            parent_task_id=parent["id"])
+    r = client.get(f"/tasks/{child['id']}")
+    assert r.json()["task"]["parent_task_id"] == parent["id"]
 
 
 def test_get_task_404_when_missing(client, db):
@@ -184,15 +189,16 @@ def test_patch_task_broadcasts_update(client, db, monkeypatch):
 # ---------------------------------------------------------------------------
 # DELETE /tasks/{id}
 # ---------------------------------------------------------------------------
-def test_delete_task_cascades(client, db):
+def test_delete_task_keeps_children_as_top_level(client, db):
     parent = db.create_task("parent", created_by="alice", assigned_to="bob")
-    sub = db.create_task("sub", created_by="alice", assigned_to="bob",
-                          parent_task_id=parent["id"])
+    child = db.create_task("child", created_by="alice", assigned_to="carol",
+                            parent_task_id=parent["id"])
     r = client.delete(f"/tasks/{parent['id']}")
     assert r.status_code == 200
-    assert r.json()["deleted_subtask_ids"] == [sub["id"]]
     assert db.get_task(parent["id"]) is None
-    assert db.get_task(sub["id"]) is None
+    survivor = db.get_task(child["id"])
+    assert survivor is not None
+    assert survivor["parent_task_id"] is None
 
 
 def test_delete_task_404_when_missing(client, db):

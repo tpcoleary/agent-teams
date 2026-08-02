@@ -2,9 +2,14 @@
 message inbox (see teams_server/inbox.py for that).
 
 Central (not per-agent) so the dashboard can query across every agent's work
-in one place. Progress and status are always explicit — a subtask completing
-NEVER auto-flips or auto-advances its parent's progress/status; that would
-produce surprising jumps whenever subtasks are added or removed later.
+in one place. Progress and status are always explicit — nothing auto-flips or
+auto-advances a task's progress/status on its behalf.
+
+`parent_task_id` is a plain OPTIONAL REFERENCE ("this belongs under that"), not
+an ownership tree: a parent does not roll up its children's progress, and
+deleting a parent does not delete them (the FK is ON DELETE SET NULL, so they
+simply become top-level). That keeps one agent's delete from silently
+destroying work assigned to someone else.
 """
 
 import logging
@@ -33,7 +38,7 @@ class TasksDB:
     CREATE TABLE IF NOT EXISTS tasks (
         id              TEXT PRIMARY KEY,
         team_id         TEXT,
-        parent_task_id  TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+        parent_task_id  TEXT REFERENCES tasks(id) ON DELETE SET NULL,
         title           TEXT NOT NULL,
         description     TEXT,
         status          TEXT NOT NULL DEFAULT 'pending',
@@ -48,7 +53,6 @@ class TasksDB:
     );
     CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to, status);
     CREATE INDEX IF NOT EXISTS idx_tasks_team     ON tasks(team_id, status);
-    CREATE INDEX IF NOT EXISTS idx_tasks_parent   ON tasks(parent_task_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_created  ON tasks(created_at DESC);
     """
 
@@ -63,8 +67,8 @@ class TasksDB:
         conn.execute("PRAGMA busy_timeout=10000")
         conn.execute("PRAGMA synchronous=NORMAL")
         # SQLite defaults foreign key enforcement OFF per connection; without
-        # this, "ON DELETE CASCADE" above silently does nothing and deleting a
-        # parent task would orphan its subtasks instead of removing them.
+        # this, "ON DELETE SET NULL" above silently does nothing and deleting a
+        # parent would leave its children pointing at a row that no longer exists.
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -120,15 +124,6 @@ class TasksDB:
     def get_task(self, task_id: str) -> Optional[dict]:
         with self._conn() as conn:
             return self._row(conn, task_id)
-
-    def get_subtasks(self, parent_task_id: str) -> List[dict]:
-        with self._conn() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM tasks WHERE parent_task_id=? ORDER BY created_at ASC",
-                (parent_task_id,),
-            ).fetchall()
-            return [dict(r) for r in rows]
 
     def list_tasks(
         self,
@@ -253,20 +248,17 @@ class TasksDB:
             conn.commit()
             return self._row(conn, task_id)
 
-    def delete_task(self, task_id: str) -> Optional[List[str]]:
-        """Delete a task and cascade to its subtasks. Returns the list of
-        deleted subtask ids (empty list if none), or None if task_id didn't exist."""
+    def delete_task(self, task_id: str) -> Optional[dict]:
+        """Delete one task, returning the deleted row (or None if it didn't
+        exist). Tasks that referenced it as their parent are NOT deleted — the
+        FK is ON DELETE SET NULL, so they just become top-level."""
         with self._lock, self._conn() as conn:
-            if self._row(conn, task_id) is None:
+            existing = self._row(conn, task_id)
+            if existing is None:
                 return None
-            conn.row_factory = sqlite3.Row
-            subtasks = conn.execute(
-                "SELECT id FROM tasks WHERE parent_task_id=?", (task_id,)
-            ).fetchall()
-            sub_ids = [r["id"] for r in subtasks]
             conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             conn.commit()
-            return sub_ids
+            return existing
 
 
 # Global singleton instance

@@ -2,13 +2,15 @@
 """Unit tests for the agent-facing task tools (teams_server/task_tools.py).
 
 Covers, with no LLM and no Hermes required:
-  1. CREATE_TASK        — self/peer assignment, non-peer rejection, validation
-  2. CREATE_SUBTASK      — parent linkage, missing-parent rejection
+  1. CREATE_TASK        — self/peer assignment, non-peer rejection, validation,
+                         optional flat parent_task_id
+  2. WAKE ON ASSIGN      — creating/reassigning a task delivers it into the
+                         assignee's inbox so they actually start work
   3. REASSIGN_TASK       — creator/assignee may reassign, third parties may not,
                           new assignee must be self-or-peer
   4. EDIT_TASK           — creator/assignee may edit; never touches status/progress
   5. UPDATE_PROGRESS     — assignee-only self-report
-  6. MARK_COMPLETE       — assignee-only, notes still-open subtasks
+  6. MARK_COMPLETE       — assignee-only
   7. MARK_BLOCKED        — assignee-only, reason required
   8. LIST_MY_TASKS       — scoped to caller, status filter
 
@@ -126,33 +128,115 @@ def test_create_task_carries_priority_and_description(_wire):
     assert out["task"]["description"] == "d"
 
 
-# ---------------------------------------------------------------------------
-# 2. create_subtask
-# ---------------------------------------------------------------------------
-def test_create_subtask_links_parent(_wire, _wire_unused=None):
+def test_create_task_with_parent_reference(_wire):
     parent = _ok(task_tools.create_task_handler(
         {"title": "Parent", "assigned_to": "alice"}, **_kwargs("alice")))["task"]
-    out = _ok(task_tools.create_subtask_handler(
-        {"parent_task_id": parent["id"], "title": "Child", "assigned_to": "bob"},
+    out = _ok(task_tools.create_task_handler(
+        {"title": "Child", "assigned_to": "bob", "parent_task_id": parent["id"]},
         **_kwargs("alice")))
     assert out["task"]["parent_task_id"] == parent["id"]
-    assert out["task"]["assigned_to"] == "bob"
 
 
-def test_create_subtask_missing_parent_rejected(_wire):
-    out = _fail(task_tools.create_subtask_handler(
-        {"parent_task_id": "nonexistent", "title": "Child", "assigned_to": "alice"},
+def test_create_task_missing_parent_rejected(_wire):
+    out = _fail(task_tools.create_task_handler(
+        {"title": "Child", "assigned_to": "alice", "parent_task_id": "nonexistent"},
         **_kwargs("alice")))
     assert "not found" in out["error"]
 
 
-def test_create_subtask_non_peer_assignee_rejected(_wire):
-    parent = _ok(task_tools.create_task_handler(
-        {"title": "Parent", "assigned_to": "alice"}, **_kwargs("alice")))["task"]
-    out = _fail(task_tools.create_subtask_handler(
-        {"parent_task_id": parent["id"], "title": "Child", "assigned_to": "carol"},
+def test_create_task_without_parent_is_top_level(_wire):
+    out = _ok(task_tools.create_task_handler(
+        {"title": "x", "assigned_to": "alice"}, **_kwargs("alice")))
+    assert out["task"]["parent_task_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# 2. Wake on assign
+# ---------------------------------------------------------------------------
+class FakeDaemon:
+    """Records what got delivered into an agent's inbox."""
+
+    def __init__(self):
+        self.ingested = []
+
+    def ingest_task(self, from_agent, payload):
+        self.ingested.append((from_agent, payload))
+        return "queued-1"
+
+
+def test_create_task_wakes_assignee(_wire, monkeypatch):
+    """A task nobody is woken for is just a row in a table — assigning must
+    deliver it into the assignee's inbox."""
+    from teams_server.tools import _daemon_registry
+
+    bob = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "bob", bob)
+
+    out = _ok(task_tools.create_task_handler(
+        {"title": "Review PR", "assigned_to": "bob", "description": "check the auth diff"},
         **_kwargs("alice")))
-    assert "not a linked peer" in out["error"]
+    assert out["assignee_woken"] is True
+    assert len(bob.ingested) == 1
+    from_agent, payload = bob.ingested[0]
+    assert from_agent == "alice"
+    assert "Review PR" in payload
+    assert "check the auth diff" in payload
+    # the payload must tell the woken agent how to close the loop
+    assert "mark_task_complete" in payload
+    assert out["task"]["id"][:8] in payload
+
+
+def test_create_task_self_assign_also_wakes(_wire, monkeypatch):
+    from teams_server.tools import _daemon_registry
+
+    alice = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "alice", alice)
+    out = _ok(task_tools.create_task_handler(
+        {"title": "my own todo", "assigned_to": "alice"}, **_kwargs("alice")))
+    assert out["assignee_woken"] is True
+    assert len(alice.ingested) == 1
+
+
+def test_create_task_records_even_when_assignee_has_no_daemon(_wire):
+    """No running daemon must not lose the task — it's recorded, and the caller
+    is told plainly that nothing will start yet."""
+    out = _ok(task_tools.create_task_handler(
+        {"title": "x", "assigned_to": "bob"}, **_kwargs("alice")))
+    assert out["assignee_woken"] is False
+    assert "no running daemon" in out["message"]
+    assert out["task"]["id"]  # still persisted
+
+
+def test_wake_failure_does_not_fail_the_task(_wire, monkeypatch):
+    """A daemon that throws on ingest must not roll back or error the create —
+    the task is already the durable record."""
+    from teams_server.tools import _daemon_registry
+
+    class Boom:
+        def ingest_task(self, from_agent, payload):
+            raise RuntimeError("inbox exploded")
+
+    monkeypatch.setitem(_daemon_registry, "bob", Boom())
+    out = _ok(task_tools.create_task_handler(
+        {"title": "x", "assigned_to": "bob"}, **_kwargs("alice")))
+    assert out["assignee_woken"] is False
+    assert out["task"]["title"] == "x"
+
+
+def test_reassign_wakes_new_assignee(_wire, monkeypatch):
+    from teams_server.tools import _daemon_registry
+
+    bob = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "bob", bob)
+    task = _ok(task_tools.create_task_handler(
+        {"title": "t", "assigned_to": "alice"}, **_kwargs("alice")))["task"]
+    bob.ingested.clear()
+
+    out = _ok(task_tools.reassign_task_handler(
+        {"task_id": task["id"], "assigned_to": "bob"}, **_kwargs("alice")))
+    assert out["assignee_woken"] is True
+    assert len(bob.ingested) == 1
+    assert "t" in bob.ingested[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -287,17 +371,6 @@ def test_complete_by_non_assignee_rejected(_wire):
     out = _fail(task_tools.mark_task_complete_handler(
         {"task_id": task["id"]}, **_kwargs("alice")))
     assert "assignee" in out["error"]
-
-
-def test_complete_flags_open_subtasks(_wire):
-    parent = _ok(task_tools.create_task_handler(
-        {"title": "Parent", "assigned_to": "bob"}, **_kwargs("alice")))["task"]
-    task_tools.create_subtask_handler(
-        {"parent_task_id": parent["id"], "title": "Child", "assigned_to": "bob"},
-        **_kwargs("alice"))
-    out = _ok(task_tools.mark_task_complete_handler(
-        {"task_id": parent["id"]}, **_kwargs("bob")))
-    assert "still open" in out["message"]
 
 
 # ---------------------------------------------------------------------------

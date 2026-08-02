@@ -6,6 +6,11 @@ caller is linked to (the same `peer_allowed` predicate send_peer_message
 already uses). Self-report actions (progress/complete/blocked) require the
 caller to BE the current assignee — a delegator cannot fake a worker's status.
 
+Assigning a task WAKES the assignee (it lands in their inbox via the same
+ingest_task path send_peer_message uses), so create_task is a real hand-off on
+its own and needs no accompanying message. `parent_task_id` is an optional flat
+reference for grouping, not a tree: no roll-up, no cascade.
+
 `failed` has no tool here by design — it's reachable only via the dashboard's
 human PATCH endpoint (see server.py). Agents signal trouble with
 mark_task_blocked; a human makes the final call that something is dead.
@@ -80,6 +85,36 @@ def _emit(event: str, task: dict, caller: str, **extra) -> None:
     _broadcast(f"task_{event}", {**task, "timestamp": time.time(), **extra})
 
 
+def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
+    """Deliver the task into the assignee's inbox so it actually WAKES and works
+    on it — a task nobody is woken for is just a row in a table. Returns False
+    if that agent has no running daemon (the task is still recorded).
+
+    Self-assignment is delivered too: the caller is mid-turn now, so this lands
+    as its next turn's work rather than being silently dropped.
+    """
+    from teams_server.tools import _daemon_registry
+
+    target = _daemon_registry.get(assignee)
+    if target is None:
+        return False
+    body = task["title"]
+    if task.get("description"):
+        body += f"\n{task['description']}"
+    payload = (
+        f"[TASK · id={task['id'][:8]} · from {caller}]\n{body}\n\n"
+        f"When you're done, call mark_task_complete(task_id=\"{task['id']}\"). "
+        f"Report partial progress with update_task_progress, or "
+        f"mark_task_blocked(reason=…) if you can't proceed."
+    )
+    try:
+        target.ingest_task(from_agent=caller, payload=payload)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[task] could not wake '%s': %s", assignee, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -88,10 +123,11 @@ CREATE_TASK_TOOL_SCHEMA = {
     "function": {
         "name": "create_task",
         "description": (
-            "Create a top-level task and assign it to yourself or a linked peer. "
-            "This is the durable, human-visible record of work — distinct from "
-            "send_peer_message, which just notifies. Assigning a task does NOT wake "
-            "the assignee; use send_peer_message separately if they need to know now."
+            "Create a task and assign it to yourself or a linked peer. This is "
+            "the durable, human-visible record of work AND the way to hand work "
+            "off: the assignee is woken and receives the task in their inbox, so "
+            "you do not need a separate send_peer_message to kick them off. "
+            "Optionally set parent_task_id to file this under a broader task."
         ),
         "parameters": {
             "type": "object",
@@ -103,34 +139,16 @@ CREATE_TASK_TOOL_SCHEMA = {
                     "type": "integer",
                     "description": "0=low, 1=normal (default), 2=high, 3=urgent.",
                 },
-            },
-            "required": ["title", "assigned_to"],
-        },
-    },
-}
-
-CREATE_SUBTASK_TOOL_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "create_subtask",
-        "description": (
-            "Create a subtask under an existing task. Breaks down a larger task "
-            "into pieces that can be assigned/tracked independently. The parent's "
-            "own status/progress is never auto-changed by its subtasks."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "parent_task_id": {"type": "string", "description": "The parent task's id."},
-                "title": {"type": "string", "description": "Short subtask title."},
-                "description": {"type": "string", "description": "Optional detail."},
-                "assigned_to": {"type": "string", "description": "Yourself or a linked peer."},
-                "priority": {
-                    "type": "integer",
-                    "description": "0=low, 1=normal (default), 2=high, 3=urgent.",
+                "parent_task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional id of a broader task this belongs under. A "
+                        "reference only — the parent's own status and progress "
+                        "are unaffected by this task."
+                    ),
                 },
             },
-            "required": ["parent_task_id", "title", "assigned_to"],
+            "required": ["title", "assigned_to"],
         },
     },
 }
@@ -140,9 +158,9 @@ REASSIGN_TASK_TOOL_SCHEMA = {
     "function": {
         "name": "reassign_task",
         "description": (
-            "Reassign a task to a different agent. You must be the task's creator "
-            "or its current assignee, and the new assignee must be yourself or a "
-            "linked peer."
+            "Reassign a task to a different agent, waking them with it. You must "
+            "be the task's creator or its current assignee, and the new assignee "
+            "must be yourself or a linked peer."
         ),
         "parameters": {
             "type": "object",
@@ -251,7 +269,6 @@ LIST_MY_TASKS_TOOL_SCHEMA = {
 
 TASK_TOOL_SCHEMAS = (
     CREATE_TASK_TOOL_SCHEMA,
-    CREATE_SUBTASK_TOOL_SCHEMA,
     REASSIGN_TASK_TOOL_SCHEMA,
     EDIT_TASK_TOOL_SCHEMA,
     UPDATE_TASK_PROGRESS_TOOL_SCHEMA,
@@ -275,48 +292,28 @@ def create_task_handler(args: dict, **kwargs) -> str:
     assign_error = _check_assignee(cfg, caller, assignee)
     if assign_error:
         return _err(assign_error)
+    parent_task_id = (args.get("parent_task_id") or "").strip() or None
+    if parent_task_id and task_db.get_task(parent_task_id) is None:
+        return _err(f"Parent task '{parent_task_id}' not found.")
     team_id = cfg["agents"].get(caller, {}).get("team_id")
     try:
         task = task_db.create_task(
             title, created_by=caller, assigned_to=assignee,
             description=args.get("description") or "", team_id=team_id,
-            priority=args.get("priority", 1),
+            priority=args.get("priority", 1), parent_task_id=parent_task_id,
         )
     except ValueError as e:
         return _err(str(e))
     log.info("[create_task] %s created '%s' -> %s", caller, title, assignee)
     _emit("created", task, caller)
-    return json.dumps({"success": True, "task": task})
-
-
-def create_subtask_handler(args: dict, **kwargs) -> str:
-    caller, cfg, error = _resolve_caller(kwargs)
-    if error:
-        return _err(error)
-    parent_id = args.get("parent_task_id") or ""
-    parent = task_db.get_task(parent_id)
-    if parent is None:
-        return _err(f"Parent task '{parent_id}' not found.")
-    title = (args.get("title") or "").strip()
-    if not title:
-        return _err("title is required.")
-    assignee = args.get("assigned_to") or ""
-    assign_error = _check_assignee(cfg, caller, assignee)
-    if assign_error:
-        return _err(assign_error)
-    team_id = cfg["agents"].get(caller, {}).get("team_id")
-    try:
-        task = task_db.create_task(
-            title, created_by=caller, assigned_to=assignee,
-            description=args.get("description") or "", team_id=team_id,
-            priority=args.get("priority", 1), parent_task_id=parent_id,
+    woken = _wake_assignee(assignee, caller, task)
+    result: Dict[str, Any] = {"success": True, "task": task, "assignee_woken": woken}
+    if not woken:
+        result["message"] = (
+            f"Task recorded, but '{assignee}' has no running daemon — it will not "
+            "start until that agent is up."
         )
-    except ValueError as e:
-        return _err(str(e))
-    log.info("[create_subtask] %s created '%s' under %s -> %s",
-             caller, title, parent_id[:8], assignee)
-    _emit("subtask_created", task, caller, parent_task_id=parent_id)
-    return json.dumps({"success": True, "task": task})
+    return json.dumps(result)
 
 
 def reassign_task_handler(args: dict, **kwargs) -> str:
@@ -336,7 +333,8 @@ def reassign_task_handler(args: dict, **kwargs) -> str:
     updated = task_db.reassign_task(task_id, new_assignee)
     log.info("[reassign_task] %s reassigned %s -> %s", caller, task_id[:8], new_assignee)
     _emit("reassigned", updated, caller, previous_assignee=task.get("assigned_to"))
-    return json.dumps({"success": True, "task": updated})
+    woken = _wake_assignee(new_assignee, caller, updated)
+    return json.dumps({"success": True, "task": updated, "assignee_woken": woken})
 
 
 def edit_task_handler(args: dict, **kwargs) -> str:
@@ -389,14 +387,7 @@ def mark_task_complete_handler(args: dict, **kwargs) -> str:
     updated = task_db.set_status(task_id, STATUS_DONE)
     log.info("[mark_task_complete] %s completed %s", caller, task_id[:8])
     _emit("completed", updated, caller)
-    open_subtasks = [s for s in task_db.get_subtasks(task_id) if s.get("status") not in ("done", "failed")]
-    result: Dict[str, Any] = {"success": True, "task": updated}
-    if open_subtasks:
-        result["message"] = (
-            f"Completed, but {len(open_subtasks)} subtask(s) are still open — "
-            "this does not block completion, just flagging it."
-        )
-    return json.dumps(result)
+    return json.dumps({"success": True, "task": updated})
 
 
 def mark_task_blocked_handler(args: dict, **kwargs) -> str:
@@ -428,11 +419,9 @@ def list_my_tasks_handler(args: dict, **kwargs) -> str:
 
 _HANDLERS = (
     ("create_task", CREATE_TASK_TOOL_SCHEMA, create_task_handler,
-     "Create a task and assign it to yourself or a linked peer."),
-    ("create_subtask", CREATE_SUBTASK_TOOL_SCHEMA, create_subtask_handler,
-     "Create a subtask under an existing task."),
+     "Create a task, assign it to yourself or a linked peer, and wake them with it."),
     ("reassign_task", REASSIGN_TASK_TOOL_SCHEMA, reassign_task_handler,
-     "Reassign a task to a different agent."),
+     "Reassign a task to a different agent, waking them with it."),
     ("edit_task", EDIT_TASK_TOOL_SCHEMA, edit_task_handler,
      "Edit a task's title/description/priority."),
     ("update_task_progress", UPDATE_TASK_PROGRESS_TOOL_SCHEMA, update_task_progress_handler,

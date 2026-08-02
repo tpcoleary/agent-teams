@@ -1947,8 +1947,7 @@ async def get_task(task_id: str):
     task = task_db.get_task(task_id)
     if task is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    subtasks = task_db.get_subtasks(task_id)
-    return JSONResponse({"task": task, "subtasks": subtasks})
+    return JSONResponse({"task": task})
 
 
 @app.patch("/tasks/{task_id}")
@@ -1995,14 +1994,12 @@ async def delete_task(task_id: str):
 
     from teams_server.websocket import _broadcast
 
-    deleted_subtask_ids = task_db.delete_task(task_id)
-    if deleted_subtask_ids is None:
+    deleted = task_db.delete_task(task_id)
+    if deleted is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     monitor_db.log_event("human", "task_deleted", data={"task_id": task_id})
-    _broadcast("task_deleted", {
-        "task_id": task_id, "subtask_ids": deleted_subtask_ids, "timestamp": time.time(),
-    })
-    return JSONResponse({"success": True, "deleted_subtask_ids": deleted_subtask_ids})
+    _broadcast("task_deleted", {"task_id": task_id, "timestamp": time.time()})
+    return JSONResponse({"success": True, "task": deleted})
 
 
 # ---------------------------------------------------------------------------

@@ -3,14 +3,15 @@
 
 Covers, with no LLM and no Hermes required:
   1. CREATE / GET      — basic lifecycle, blank-title rejection
-  2. SUBTASKS           — parent linkage, missing-parent rejection, listing
+  2. PARENT REFERENCE   — optional flat parent link, missing-parent rejection,
+                         no roll-up onto the parent
   3. LIST FILTERS       — team_id / assigned_to / status filters
   4. EDIT               — partial update of descriptive fields only
   5. REASSIGN           — assignee change
   6. PROGRESS           — clamping, pending->in_progress auto-flip
   7. SET STATUS         — enum validation, blocked_reason, completed_at,
                          reopening a terminal task
-  8. CASCADE DELETE     — deleting a parent removes its subtasks too
+  8. DELETE             — children survive as top-level (ON DELETE SET NULL)
 
 Run:  pytest tests/test_tasks_db.py -v
 """
@@ -69,29 +70,38 @@ def test_priority_clamped_to_range(db):
 
 
 # ---------------------------------------------------------------------------
-# 2. Subtasks
+# 2. Parent reference (flat, optional — not a subtask tree)
 # ---------------------------------------------------------------------------
-def test_create_subtask_and_list(db):
+def test_create_task_with_parent_reference(db):
     parent = db.create_task("Ship feature", created_by="alice", assigned_to="alice")
-    sub1 = db.create_task("Write tests", created_by="alice", assigned_to="bob",
-                           parent_task_id=parent["id"])
-    sub2 = db.create_task("Update docs", created_by="alice", assigned_to="bob",
-                           parent_task_id=parent["id"])
-
-    subs = db.get_subtasks(parent["id"])
-    assert {s["id"] for s in subs} == {sub1["id"], sub2["id"]}
-    assert all(s["parent_task_id"] == parent["id"] for s in subs)
+    child = db.create_task("Write tests", created_by="alice", assigned_to="bob",
+                            parent_task_id=parent["id"])
+    assert child["parent_task_id"] == parent["id"]
 
 
-def test_create_subtask_missing_parent_rejected(db):
+def test_create_task_missing_parent_rejected(db):
     with pytest.raises(ValueError):
         db.create_task("orphan", created_by="alice", assigned_to="bob",
                         parent_task_id="does-not-exist")
 
 
-def test_get_subtasks_empty_for_leaf_task(db):
-    task = db.create_task("leaf", created_by="alice", assigned_to="bob")
-    assert db.get_subtasks(task["id"]) == []
+def test_children_are_listed_like_any_other_task(db):
+    """A parent reference is metadata, not containment: children show up in
+    list_tasks alongside everything else."""
+    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
+    db.create_task("child", created_by="alice", assigned_to="bob",
+                    parent_task_id=parent["id"])
+    assert len(db.list_tasks()) == 2
+
+
+def test_parent_progress_is_not_affected_by_child(db):
+    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
+    child = db.create_task("child", created_by="alice", assigned_to="bob",
+                            parent_task_id=parent["id"])
+    db.set_status(child["id"], "done")
+    refreshed = db.get_task(parent["id"])
+    assert refreshed["status"] == "pending"
+    assert refreshed["progress"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -251,23 +261,27 @@ def test_set_status_missing_task_returns_none(db):
 
 
 # ---------------------------------------------------------------------------
-# 8. Cascade delete
+# 8. Delete (no cascade — children survive as top-level)
 # ---------------------------------------------------------------------------
-def test_delete_task_cascades_to_subtasks(db):
-    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
-    sub = db.create_task("sub", created_by="alice", assigned_to="bob",
-                          parent_task_id=parent["id"])
-
-    deleted_ids = db.delete_task(parent["id"])
-    assert deleted_ids == [sub["id"]]
-    assert db.get_task(parent["id"]) is None
-    assert db.get_task(sub["id"]) is None
-
-
-def test_delete_leaf_task_returns_empty_list(db):
+def test_delete_task_returns_deleted_row(db):
     task = db.create_task("t", created_by="alice", assigned_to="bob")
-    deleted_ids = db.delete_task(task["id"])
-    assert deleted_ids == []
+    deleted = db.delete_task(task["id"])
+    assert deleted["id"] == task["id"]
+    assert db.get_task(task["id"]) is None
+
+
+def test_delete_parent_keeps_children_as_top_level(db):
+    """Deleting a parent must NOT destroy work assigned to someone else — the
+    FK is ON DELETE SET NULL, so children survive and become top-level."""
+    parent = db.create_task("parent", created_by="alice", assigned_to="bob")
+    child = db.create_task("child", created_by="alice", assigned_to="carol",
+                            parent_task_id=parent["id"])
+
+    db.delete_task(parent["id"])
+    survivor = db.get_task(child["id"])
+    assert survivor is not None
+    assert survivor["parent_task_id"] is None
+    assert survivor["title"] == "child"
 
 
 def test_delete_missing_task_returns_none(db):
