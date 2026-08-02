@@ -553,7 +553,7 @@ class AgentDaemon:
         self._turn_sigs: deque = deque(maxlen=max(SELF_LOOP_WINDOW, 8))
         self._last_self_loop_nudge = 0.0
         # Passive-message delivery watermark (events.id). Seeded to "now" so the
-        # agent's next turn delivers only STATUS/FYI that arrive from here on,
+        # agent's next turn delivers only FYI that arrive from here on,
         # never a historical backlog.
         try:
             self._passive_watermark = monitor_db.get_latest_event_id()
@@ -2295,7 +2295,7 @@ class AgentDaemon:
                         pass
                     plines.append(f"  [{stamp}] {p['from_agent']} ({p['kind']}): {p['text']}")
                 combined += (
-                    "--- PASSIVE UPDATES addressed to you while idle (STATUS/FYI — "
+                    "--- PASSIVE UPDATES addressed to you while idle (FYI — "
                     "informational only; you owe NO reply and must not answer them) ---\n"
                     + "\n".join(plines) + "\n\n"
                 )

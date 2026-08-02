@@ -34,10 +34,13 @@ from teams_server.monitoring import monitor_db
 
 log = logging.getLogger("teams.loopdetector")
 
-# Kinds that WAKE the recipient. "TASK" is retained because this scans
-# historical message rows, which still carry it from before assignment moved to
-# create_task; send_peer_message no longer produces it.
-_WAKING = {"TASK", "QUESTION", "RESULT"}
+# Kinds that WAKE the recipient, and so can form a real ping-pong loop.
+# STATUS is in here because it now wakes: its passivity used to BE the cure for
+# status ping-pong ("an agent literally cannot wake a peer just to confirm a
+# status"), so waking it reopens that door and this detector is what has to catch
+# it. "TASK" is retained because this scans historical message rows that still
+# carry it from before assignment moved to create_task.
+_WAKING = {"TASK", "QUESTION", "RESULT", "STATUS"}
 
 # signature -> last alert time, for cooldown dedup across scans.
 _last_alert: Dict[str, float] = {}
@@ -78,7 +81,7 @@ def _detect_pair_pingpong(msgs: List[dict]) -> Optional[dict]:
     pairs: Dict[frozenset, List[dict]] = {}
     for m in msgs:
         if m["kind"] and m["kind"] not in _WAKING:
-            continue  # STATUS/FYI don't wake — they can't be a loop
+            continue  # FYI doesn't wake — it can't be a loop
         if not m["from"] or not m["to"]:
             continue
         pairs.setdefault(frozenset((m["from"], m["to"])), []).append(m)

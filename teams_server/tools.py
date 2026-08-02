@@ -217,21 +217,24 @@ _SEND_PEER_MESSAGE_TOOL_SCHEMA = {
         "description": (
             "Talk to a linked peer. This is for CONVERSATION, not for handing out "
             "work — to give a peer something to do, use `create_task` instead "
-            "(it wakes them the same way and tracks the work).\n"
-            "The `kind` controls whether it WAKES the recipient — choose it "
-            "deliberately, it is how the teams avoids endless status ping-pong:\n"
-            "• STATUS — a progress update. Does NOT wake anyone; it appears in the "
-            "team's recent-messages feed. This is the usual choice.\n"
-            "• FYI — informational note. Does NOT wake anyone.\n"
+            "(it wakes them, tracks the work, and reports back to you).\n"
+            "The `kind` controls whether it WAKES the recipient and what they owe "
+            "you back — choose it deliberately:\n"
+            "• STATUS — a progress note they should see now. WAKES them, but they "
+            "owe you NOTHING back. This is the usual choice.\n"
+            "• FYI — a heads-up that can wait. Does NOT wake anyone; it is shown "
+            "quietly at the start of their next turn. Use it when you have "
+            "something to share but no reason to interrupt.\n"
             "• QUESTION — ask something you genuinely need answered to proceed. "
             "WAKES them; they owe you a RESULT. Not for anything you want DONE — "
             "that's a task.\n"
             "• RESULT — answer a QUESTION someone asked you. WAKES that one peer "
             "and closes the question. Pass `reply_to` = the id you were given. "
             "(You do NOT need this to report finished task work — "
-            "mark_task_complete already reports to whoever created the task.)\n"
-            "NEVER send a QUESTION just to acknowledge or confirm — that creates a "
-            "loop. If you have no concrete ask, use STATUS/FYI (or send nothing)."
+            "mark_task_complete already reports up the chain for you.)\n"
+            "NEVER reply to a STATUS or send a QUESTION just to acknowledge or "
+            "confirm — that creates a loop. If you have no concrete ask, use "
+            "STATUS/FYI (or send nothing)."
         ),
         "parameters": {
             "type": "object",
@@ -242,8 +245,9 @@ _SEND_PEER_MESSAGE_TOOL_SCHEMA = {
                     "type": "string",
                     "enum": ["STATUS", "FYI", "QUESTION", "RESULT"],
                     "description": (
-                        "Message type. QUESTION/RESULT wake the recipient; STATUS/FYI "
-                        "do not. Defaults to STATUS. To assign work, use create_task."
+                        "Message type. STATUS/QUESTION/RESULT wake the recipient; only "
+                        "FYI is passive. Defaults to STATUS. To assign work, use "
+                        "create_task."
                     ),
                 },
                 "reply_to": {
@@ -803,10 +807,12 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
     import hashlib as _hashlib
     import time as _time
 
-    # Typed messages: kind decides whether the recipient is WOKEN. STATUS/FYI are
-    # passive (they surface in the recipient's recent-messages feed but create no
-    # task), which is the structural cure for the acknowledge/status ping-pong —
-    # an agent literally cannot wake a peer just to confirm a status.
+    # Typed messages: kind decides whether the recipient is WOKEN and what they
+    # owe back. Only FYI is passive (it surfaces in the recipient's next turn but
+    # creates no task). STATUS wakes but owes nothing back — the anti-ping-pong
+    # guarantee is now "you never REPLY to a STATUS", enforced by the prompt's
+    # anti-loop rule and by loop_detector treating STATUS as a loop-capable kind,
+    # rather than by making it undeliverable.
     #
     # TASK is deliberately GONE: assigning work is create_task's job. Two doors
     # for one delegation meant only one of them (this one) wrote the delegation
@@ -831,7 +837,12 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
         kind = "STATUS"
     reply_to = (args.get("reply_to") or "").strip()
     team_id = cfg["agents"].get(caller, {}).get("team_id")
-    waking = kind in ("QUESTION", "RESULT")
+    # STATUS wakes: a progress update that only surfaces at the start of the
+    # recipient's next turn arrives too late to act on, and senders who noticed
+    # their STATUS went unseen escalated to waking kinds just to be heard. FYI is
+    # the one deliberately passive kind — the way to share something without
+    # costing anyone a turn.
+    waking = kind in ("QUESTION", "RESULT", "STATUS")
     # DETERMINISTIC correlation id: derive it from the message identity, NOT a
     # fresh uuid. A random id was embedded in the header, so two identical TASK
     # sends produced different payloads and slipped past the queue's byte-identical
@@ -852,6 +863,14 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
                 f"send_peer_message(to_agent=\"{caller}\", kind=\"RESULT\", "
                 f"reply_to=\"{msg_id}\")]\n"
             )
+        elif kind == "STATUS":
+            # Wakes, but owes nothing back. The "[STATUS" prefix is load-bearing:
+            # the turn-guard treats it as a notification, so a turn that reads it
+            # and legitimately has nothing to do is not nudged for a reply.
+            header = (
+                f"[STATUS · from {caller} — informational; you owe NO reply. "
+                f"Act on it only if it changes what you should do next.]\n"
+            )
         else:  # RESULT
             header = f"[RESULT · from {caller}" + (f" · re {reply_to}" if reply_to else "") + "]\n"
         task_id = target.ingest_task(from_agent=caller, payload=header + message)
@@ -866,7 +885,7 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
         log.info("[send_peer_message] %s -%s-> %s | id=%s task=%s",
                  caller, kind, to_agent, msg_id, (task_id or "")[:8])
     else:
-        # STATUS / FYI — recorded for awareness, but NOT enqueued and NOT woken.
+        # FYI — recorded for awareness, but NOT enqueued and NOT woken.
         log.info("[send_peer_message] %s -%s-> %s | id=%s (passive, no wake)",
                  caller, kind, to_agent, msg_id)
 
@@ -903,7 +922,8 @@ def _send_peer_message_handler(args: dict, **kwargs) -> str:
             "message": (
                 f"{kind} recorded for '{to_agent}' (passive — it was NOT woken and owes "
                 f"no reply; the full text will be shown to it at the start of its next "
-                f"turn). Do not follow up with a TASK just to make sure it was seen."
+                f"turn). If it needs to see this now, send kind=STATUS instead — do "
+                f"not create a task just to make sure it was seen."
             ),
         })
 

@@ -119,8 +119,8 @@ def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
         body += f"\n{task['description']}"
     close_out = (
         f"When you're done, call mark_task_complete(task_id=\"{task['id']}\", "
-        f"summary=\"…\") — that reports back to whoever created the task, so you "
-        f"do NOT need to send them a separate message. Report partial progress "
+        f"summary=\"…\") — that reports back up the chain for you, so you do NOT "
+        f"need to send anyone a separate message. Report partial progress "
         f"with update_task_progress, or mark_task_blocked(reason=…) if you're stuck."
     )
     if assignee == caller:
@@ -130,26 +130,47 @@ def _wake_assignee(assignee: str, caller: str, task: dict) -> bool:
     return _deliver(assignee, caller, payload)
 
 
-def _notify_creator(task: dict, caller: str, *, outcome: str, detail: str) -> bool:
-    """Report a terminal/blocking outcome to whoever created the task.
+def _report_target(task: dict) -> Optional[str]:
+    """Who hears about this task finishing.
+
+    The assignee of the PARENT task, not the creator — because in a chain
+    A→B→C→D it is the agent working the parent who is blocked on this result and
+    needs it to continue. Reporting to the creator instead would tell whoever
+    filed the paperwork, which is often not the one waiting: if A files a child
+    of a task B is executing, B is the one who needs the answer.
+
+    Falls back to created_by when there is no parent (top of the chain), when the
+    parent has since been deleted (the FK nulls the link, so this is a race), or
+    when the parent has no assignee.
+    """
+    parent_id = task.get("parent_task_id")
+    if parent_id:
+        parent = task_db.get_task(parent_id)
+        if parent and parent.get("assigned_to"):
+            return parent["assigned_to"]
+    return task.get("created_by")
+
+
+def _report_upward(task: dict, caller: str, *, outcome: str, detail: str) -> bool:
+    """Report a terminal/blocking outcome one level up the work chain.
 
     This is what makes the task the ONLY thing an agent has to remember: setting
     a status IS reporting it. Previously an agent could complete work and still
-    leave its delegator waiting, because the report was a separate
+    leave the agent above it waiting, because the report was a separate
     send_peer_message call it had to remember to make — and the turn-guard nudge
     was the only thing catching it when it didn't.
 
-    Returns False when there is nobody to tell (self-created task) or the creator
-    has no running daemon. Never raises.
+    Returns False when there is nobody to tell (the work chain terminates at the
+    caller itself) or that agent has no running daemon. Never raises.
     """
-    creator = task.get("created_by")
-    if not creator or creator == task.get("assigned_to"):
-        return False  # self-assigned: no delegator is waiting
+    target = _report_target(task)
+    if not target or target == caller:
+        return False  # nobody above is waiting on this
     payload = (
         f"[RESULT · from {caller} · re {task['id'][:8]}]\n"
         f"{outcome}: {task.get('title')}\n{detail}"
     )
-    return _deliver(creator, caller, payload)
+    return _deliver(target, caller, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +280,11 @@ MARK_TASK_COMPLETE_TOOL_SCHEMA = {
         "name": "mark_task_complete",
         "description": (
             "Mark a task assigned to you as done (sets progress to 100) AND "
-            "report the outcome back to whoever created it. Assignee-only. This "
-            "is the ONLY thing you need to do to close out delegated work — do "
-            "not also send_peer_message a RESULT, that would report it twice."
+            "report the outcome one level up the work chain — to whoever is "
+            "working the parent task, or to the task's creator if it has no "
+            "parent. Assignee-only. This is the ONLY thing you need to do to "
+            "close out delegated work — do not also send_peer_message a RESULT, "
+            "that would report it twice."
         ),
         "parameters": {
             "type": "object",
@@ -271,7 +294,7 @@ MARK_TASK_COMPLETE_TOOL_SCHEMA = {
                     "type": "string",
                     "description": (
                         "What you actually did/found — this is the text the "
-                        "creator receives, so make it self-contained."
+                        "agent above you receives, so make it self-contained."
                     ),
                 },
             },
@@ -462,27 +485,29 @@ def mark_task_complete_handler(args: dict, **kwargs) -> str:
     if task.get("status") in TERMINAL_STATUSES:
         return json.dumps({
             "success": True, "task": task, "already_complete": True,
-            "reported_to_creator": False,
+            "reported_to": None,
             "message": (
-                f"Already {task['status']} — nothing further to do, and the "
-                "creator was already told. Do not report this again."
+                f"Already {task['status']} — nothing further to do, and it was "
+                "already reported. Do not report this again."
             ),
         })
 
     updated = task_db.set_status(task_id, STATUS_DONE)
     log.info("[mark_task_complete] %s completed %s", caller, task_id[:8])
     _emit("completed", updated, caller)
-    reported = _notify_creator(
+    target = _report_target(updated)
+    reported = _report_upward(
         updated, caller, outcome="DONE",
         detail=summary or "Completed (no summary given).")
     result: Dict[str, Any] = {
-        "success": True, "task": updated, "reported_to_creator": reported,
+        "success": True, "task": updated,
+        "reported_to": target if reported else None,
     }
     result["message"] = (
-        f"Done, and '{updated['created_by']}' has been told — do NOT also send "
-        f"them a message about it."
+        f"Done, and '{target}' has been told — do NOT also send them a message "
+        f"about it."
         if reported else
-        "Done. Nobody else is waiting on this one, so no report was sent."
+        "Done. Nobody above you is waiting on this one, so no report was sent."
     )
     return json.dumps(result)
 
@@ -503,14 +528,16 @@ def mark_task_blocked_handler(args: dict, **kwargs) -> str:
     updated = task_db.set_status(task_id, STATUS_BLOCKED, blocked_reason=reason)
     log.info("[mark_task_blocked] %s blocked %s: %s", caller, task_id[:8], reason[:80])
     _emit("blocked", updated, caller)
-    # A block is exactly when the delegator most needs to hear from you — it's
+    # A block is exactly when the agent above most needs to hear from you — it's
     # the case where silence looks identical to "still working".
-    reported = _notify_creator(updated, caller, outcome="BLOCKED", detail=reason)
+    target = _report_target(updated)
+    reported = _report_upward(updated, caller, outcome="BLOCKED", detail=reason)
     return json.dumps({
-        "success": True, "task": updated, "reported_to_creator": reported,
+        "success": True, "task": updated,
+        "reported_to": target if reported else None,
         "message": (
-            f"Blocked, and '{updated['created_by']}' has been told."
-            if reported else "Blocked. No creator to notify."
+            f"Blocked, and '{target}' has been told."
+            if reported else "Blocked. Nobody above you to notify."
         ),
     })
 

@@ -647,7 +647,7 @@ class MonitoringDB:
 
     def get_passive_messages_for(self, to_agent: str, after_event_id: int = 0,
                                  limit: int = 20) -> Dict[str, Any]:
-        """Non-waking peer messages (STATUS/FYI) addressed to one agent, with
+        """Non-waking peer messages (FYI) addressed to one agent, with
         event id > after_event_id, oldest first.
 
         Passive messages deliberately create no task — but before this query

@@ -41,6 +41,11 @@ CFG = {
         "bob": {"team_id": "t1", "allowed_peers": []},
         "carol": {"team_id": "t1", "allowed_peers": []},  # not linked to alice/bob
         "dave": {"team_id": "t2", "allowed_peers": []},   # different team entirely
+        # A 3-level chain for the report-upward tests, mutually linked so
+        # assignment is allowed at every level: lead -> mid -> worker.
+        "lead": {"team_id": "t1", "allowed_peers": ["mid", "worker"]},
+        "mid": {"team_id": "t1", "allowed_peers": ["worker"]},
+        "worker": {"team_id": "t1", "allowed_peers": []},
     }
 }
 
@@ -472,7 +477,7 @@ def test_complete_reports_to_creator(_wire, monkeypatch):
 
     out = _ok(task_tools.mark_task_complete_handler(
         {"task_id": task["id"], "summary": "looks good, merged"}, **_kwargs("bob")))
-    assert out["reported_to_creator"] is True
+    assert out["reported_to"] == "alice"
     assert len(alice.ingested) == 1
     from_agent, payload = alice.ingested[0]
     assert from_agent == "bob"
@@ -496,7 +501,7 @@ def test_complete_does_not_report_on_self_assigned_task(_wire, monkeypatch):
 
     out = _ok(task_tools.mark_task_complete_handler(
         {"task_id": task["id"]}, **_kwargs("alice")))
-    assert out["reported_to_creator"] is False
+    assert out["reported_to"] is None
     assert alice.ingested == []
 
 
@@ -517,9 +522,9 @@ def test_completion_is_idempotent_and_reports_once(_wire, monkeypatch):
     second = _ok(task_tools.mark_task_complete_handler(
         {"task_id": task["id"], "summary": "done again"}, **_kwargs("bob")))
 
-    assert first["reported_to_creator"] is True
+    assert first["reported_to"] == "alice"
     assert second.get("already_complete") is True
-    assert second["reported_to_creator"] is False
+    assert second["reported_to"] is None
     assert len(alice.ingested) == 1, "one completion must produce exactly one report"
 
 
@@ -536,7 +541,7 @@ def test_blocked_reports_to_creator(_wire, monkeypatch):
 
     out = _ok(task_tools.mark_task_blocked_handler(
         {"task_id": task["id"], "reason": "need prod credentials"}, **_kwargs("bob")))
-    assert out["reported_to_creator"] is True
+    assert out["reported_to"] == "alice"
     assert "need prod credentials" in alice.ingested[0][1]
     assert "BLOCKED" in alice.ingested[0][1]
 
@@ -557,7 +562,7 @@ def test_report_delivery_failure_does_not_fail_completion(_wire, monkeypatch):
     out = _ok(task_tools.mark_task_complete_handler(
         {"task_id": task["id"]}, **_kwargs("bob")))
     assert out["task"]["status"] == "done"
-    assert out["reported_to_creator"] is False
+    assert out["reported_to"] is None
 
 
 def test_complete_with_no_creator_daemon_still_completes(_wire):
@@ -566,7 +571,154 @@ def test_complete_with_no_creator_daemon_still_completes(_wire):
     out = _ok(task_tools.mark_task_complete_handler(
         {"task_id": task["id"]}, **_kwargs("bob")))
     assert out["task"]["status"] == "done"
-    assert out["reported_to_creator"] is False
+    assert out["reported_to"] is None
+
+
+# ---------------------------------------------------------------------------
+# 7c. The report walks the WORK chain, one level at a time
+# ---------------------------------------------------------------------------
+def _chain(monkeypatch):
+    """lead --T1--> mid --T2(child of T1)--> worker, with inboxes to inspect."""
+    from teams_server.tools import _daemon_registry
+
+    boxes = {}
+    for name in ("lead", "mid", "worker"):
+        boxes[name] = FakeDaemon()
+        monkeypatch.setitem(_daemon_registry, name, boxes[name])
+
+    t1 = _ok(task_tools.create_task_handler(
+        {"title": "ship the feature", "assigned_to": "mid"}, **_kwargs("lead")))["task"]
+    t2 = _ok(task_tools.create_task_handler(
+        {"title": "write the tests", "assigned_to": "worker",
+         "parent_task_id": t1["id"]}, **_kwargs("mid")))["task"]
+    for b in boxes.values():
+        b.ingested.clear()  # discard the assignment wakes
+    return boxes, t1, t2
+
+
+def test_child_reports_to_parents_assignee_not_creator(_wire, monkeypatch):
+    """The agent working the parent is the one blocked on this result."""
+    boxes, _t1, t2 = _chain(monkeypatch)
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": t2["id"], "summary": "12 tests, all green"}, **_kwargs("worker")))
+    assert out["reported_to"] == "mid"
+    assert len(boxes["mid"].ingested) == 1
+    assert "12 tests, all green" in boxes["mid"].ingested[0][1]
+    # the top of the chain is NOT told about a grandchild finishing
+    assert boxes["lead"].ingested == []
+
+
+def test_report_target_prefers_parent_assignee_over_filer(_wire, monkeypatch):
+    """The case that distinguishes "parent's assignee" from "creator": when the
+    LEAD files a child of the task MID is executing, mid is the one who needs
+    the answer — reporting to lead would leave mid waiting forever."""
+    from teams_server.tools import _daemon_registry
+
+    boxes = {}
+    for name in ("lead", "mid", "worker"):
+        boxes[name] = FakeDaemon()
+        monkeypatch.setitem(_daemon_registry, name, boxes[name])
+
+    t1 = _ok(task_tools.create_task_handler(
+        {"title": "ship it", "assigned_to": "mid"}, **_kwargs("lead")))["task"]
+    # lead — NOT mid — files the child
+    child = _ok(task_tools.create_task_handler(
+        {"title": "subtask", "assigned_to": "worker",
+         "parent_task_id": t1["id"]}, **_kwargs("lead")))["task"]
+    assert child["created_by"] == "lead"
+    for b in boxes.values():
+        b.ingested.clear()
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": child["id"]}, **_kwargs("worker")))
+    assert out["reported_to"] == "mid", "must follow the work, not the paperwork"
+    assert len(boxes["mid"].ingested) == 1
+    assert boxes["lead"].ingested == []
+
+
+def test_top_of_chain_reports_to_creator(_wire, monkeypatch):
+    """A task with no parent has nothing above it but whoever asked for it."""
+    boxes, t1, _t2 = _chain(monkeypatch)
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": t1["id"], "summary": "shipped"}, **_kwargs("mid")))
+    assert out["reported_to"] == "lead"
+    assert len(boxes["lead"].ingested) == 1
+
+
+def test_each_level_reports_exactly_one_level_up(_wire, monkeypatch):
+    """Walking the full chain bottom-to-top: no level skips or doubles."""
+    boxes, t1, t2 = _chain(monkeypatch)
+
+    task_tools.mark_task_complete_handler(
+        {"task_id": t2["id"], "summary": "inner done"}, **_kwargs("worker"))
+    task_tools.mark_task_complete_handler(
+        {"task_id": t1["id"], "summary": "outer done"}, **_kwargs("mid"))
+
+    assert len(boxes["mid"].ingested) == 1, "mid hears only about its child"
+    assert len(boxes["lead"].ingested) == 1, "lead hears only about its own task"
+    assert "inner done" in boxes["mid"].ingested[0][1]
+    assert "outer done" in boxes["lead"].ingested[0][1]
+    assert boxes["worker"].ingested == [], "nothing reports downward"
+
+
+def test_blocked_also_reports_up_the_chain(_wire, monkeypatch):
+    boxes, _t1, t2 = _chain(monkeypatch)
+    out = _ok(task_tools.mark_task_blocked_handler(
+        {"task_id": t2["id"], "reason": "need a staging DB"}, **_kwargs("worker")))
+    assert out["reported_to"] == "mid"
+    assert "need a staging DB" in boxes["mid"].ingested[0][1]
+    assert boxes["lead"].ingested == []
+
+
+def test_falls_back_to_creator_when_parent_was_deleted(_wire, monkeypatch):
+    """Deleting a parent nulls the child's link (ON DELETE SET NULL), so the
+    child must still have somewhere to report rather than going silent."""
+    boxes, t1, t2 = _chain(monkeypatch)
+    task_tools.task_db.delete_task(t1["id"])
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": t2["id"]}, **_kwargs("worker")))
+    assert out["reported_to"] == "mid", "mid created it, so mid still hears"
+    assert len(boxes["mid"].ingested) == 1
+
+
+def test_falls_back_to_creator_when_parent_has_no_assignee(_wire, monkeypatch):
+    """A parent can be unassigned (e.g. created via the REST API)."""
+    from teams_server.tools import _daemon_registry
+
+    mid = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "mid", mid)
+    orphan_parent = task_tools.task_db.create_task(
+        "unassigned epic", created_by="mid", assigned_to=None, team_id="t1")
+    child = _ok(task_tools.create_task_handler(
+        {"title": "child", "assigned_to": "worker",
+         "parent_task_id": orphan_parent["id"]}, **_kwargs("mid")))["task"]
+    mid.ingested.clear()
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": child["id"]}, **_kwargs("worker")))
+    assert out["reported_to"] == "mid"
+
+
+def test_no_report_when_the_chain_ends_at_you(_wire, monkeypatch):
+    """If you are the parent's assignee AND the one finishing, nobody above is
+    waiting — reporting to yourself is what caused the link_violation."""
+    from teams_server.tools import _daemon_registry
+
+    mid = FakeDaemon()
+    monkeypatch.setitem(_daemon_registry, "mid", mid)
+    parent = _ok(task_tools.create_task_handler(
+        {"title": "epic", "assigned_to": "mid"}, **_kwargs("mid")))["task"]
+    child = _ok(task_tools.create_task_handler(
+        {"title": "own subtask", "assigned_to": "mid",
+         "parent_task_id": parent["id"]}, **_kwargs("mid")))["task"]
+    mid.ingested.clear()
+
+    out = _ok(task_tools.mark_task_complete_handler(
+        {"task_id": child["id"]}, **_kwargs("mid")))
+    assert out["reported_to"] is None
+    assert mid.ingested == []
 
 
 # ---------------------------------------------------------------------------

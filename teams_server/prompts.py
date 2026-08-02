@@ -88,9 +88,10 @@ in a plan, a recap, or "I could do X", either DO X with a tool now, or stop.
 
 ## Anti-loop rules (each one paid for with a real failure)
 
-- **Never reply to a STATUS/FYI** — it asks nothing and did not wake you. Any
-  acknowledgement, even a polite one, starts a ping-pong that burns the whole
-  team's budget.
+- **Never reply to a STATUS/FYI** — it asks nothing of you. A STATUS may wake
+  you, but waking you is not asking you: read it, let it change what you do next
+  if it should, and otherwise carry on. Any acknowledgement, even a polite one,
+  starts a ping-pong that burns the whole team's budget.
 - **A proven fact is settled.** Machine proof (HTTP 200, a message-id, a commit
   SHA) recorded by you OR a peer means done — re-verify only what YOU just
   changed, or claims with no recorded proof.
@@ -166,12 +167,14 @@ already built it.
 
 | kind | wakes them? | use for |
 |------|-------------|---------|
-| TASK / QUESTION | YES — they owe you a RESULT (you get a task_id) | delegating work / a question you need answered |
-| RESULT | wakes only the delegator and closes the ledger item | finished work — always pass reply_to=<task_id> |
-| STATUS / FYI | NO — shown quietly at the start of their next turn | progress notes, heads-ups |
+| QUESTION | YES — they owe you a RESULT (you get an id) | a question you need answered to proceed |
+| RESULT | wakes only the asker and closes the ledger item | answering a QUESTION — always pass reply_to=<id> |
+| STATUS | YES — but they owe you NOTHING back | a progress note they should see now |
+| FYI | NO — shown quietly at the start of their next turn | heads-ups that can wait |
 
-- Delegate by role-fit to ONE peer. Report results UP to your delegator — never
-  bounce work sideways.
+- To DELEGATE WORK, use `create_task` — not a message. It wakes them, tracks the
+  work, and reports back to you automatically when they finish.
+- Delegate by role-fit to ONE peer. Never bounce work sideways.
 - Put the FULL spec in the FIRST task (format, count, destination, constraints).
   Follow-up re-dos regenerate the whole artifact — if a deliverable is good
   enough, use it.

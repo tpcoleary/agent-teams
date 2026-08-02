@@ -343,10 +343,37 @@ def test_rejected_task_does_not_wake_or_record_anything(_peer_msg_env, monkeypat
     assert opened == []
 
 
-def test_default_kind_is_now_passive(_peer_msg_env, monkeypatch):
-    """Omitting `kind` used to mean TASK — a WAKE. Since waking someone to do
-    something is create_task's job now, the safe default is a passive STATUS:
-    a bare message can no longer silently conscript a peer."""
+def test_default_kind_wakes_but_creates_no_obligation(_peer_msg_env, monkeypatch):
+    """Omitting `kind` used to mean TASK — a wake that ALSO put the recipient on
+    the hook for a RESULT. It now means STATUS, which still wakes them (a
+    progress note nobody reads until their next turn arrives too late to act on)
+    but leaves them owing nothing. The property worth protecting is that a bare
+    message cannot silently conscript a peer, not that it cannot reach them."""
+    import json
+
+    delivered = []
+    monkeypatch.setitem(
+        tools_mod._daemon_registry, "w2",
+        types.SimpleNamespace(
+            ingest_task=lambda **k: delivered.append(k) or "t1"))
+    opened = []
+    monkeypatch.setattr(tools_mod.monitor_db, "open_delegation",
+                        lambda *a, **k: opened.append(a))
+
+    out = json.loads(tools_mod._send_peer_message_handler(
+        {"to_agent": "w2", "message": "deploy went out"},
+        task_id="agent_name:w1"))
+    assert out["success"] is True
+    assert out["kind"] == "STATUS"
+    assert len(delivered) == 1, "a STATUS should reach them now, not next turn"
+    assert opened == [], "a bare message must not put anyone on the hook"
+    # the recipient is told plainly that it owes nothing back
+    assert "owe NO reply" in delivered[0]["payload"]
+
+
+def test_fyi_is_the_one_passive_kind(_peer_msg_env, monkeypatch):
+    """FYI is the deliberate escape hatch: share something without costing the
+    recipient a turn."""
     import json
 
     delivered = []
@@ -356,14 +383,14 @@ def test_default_kind_is_now_passive(_peer_msg_env, monkeypatch):
             ingest_task=lambda **k: delivered.append(k) or "t1"))
 
     out = json.loads(tools_mod._send_peer_message_handler(
-        {"to_agent": "w2", "message": "fyi, deploy went out"},
+        {"to_agent": "w2", "message": "heads up", "kind": "FYI"},
         task_id="agent_name:w1"))
     assert out["success"] is True
-    assert out["kind"] == "STATUS"
-    assert delivered == [], "a default-kind message must not wake anyone"
+    assert out["delivered"] == "passive"
+    assert delivered == [], "FYI must not wake anyone"
 
 
-def test_unknown_kind_falls_back_to_passive(_peer_msg_env):
+def test_unknown_kind_falls_back_to_status(_peer_msg_env):
     import json
 
     out = json.loads(tools_mod._send_peer_message_handler(
