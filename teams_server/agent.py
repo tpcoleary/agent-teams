@@ -85,8 +85,34 @@ AGENT_STATE_DEGRADED = "degraded"
 
 # Stable substring of every task-prompt preamble. Used to locate this turn's
 # output boundary in the returned message list (see _process_tasks_batch), so it
-# must stay in sync with the `combined` preamble that carries it.
+# must stay in sync with the preamble build_batch_prompt() emits below.
 _TASK_PROMPT_MARKER = "new message(s) to process"
+
+# Appended to a message's header when it is being delivered again after an
+# interrupted turn. A redelivered message is byte-identical to its first
+# delivery, so without this it reads as a brand-new request and the agent redoes
+# finished work — an operator's "repeat the same thing", resumed after a restart,
+# looks like a request for another round. Task-creation dedup would block the
+# duplicate task ROWS but not the wasted turn.
+REDELIVERY_NOTE = (
+    " · SEEN BEFORE — your previous turn on this message was interrupted, so you "
+    "may have already done some or all of it. Check the real current state (YOUR "
+    "TASKS above, the project tree, the decision log) and finish what's left "
+    "instead of starting over"
+)
+
+
+def build_batch_prompt(tasks: List[Dict[str, Any]]) -> str:
+    """Render a drained inbox batch into the turn's user message.
+
+    Kept module-level (rather than inline in _process_tasks_batch) so the
+    redelivery annotation is testable without constructing a daemon.
+    """
+    out = f"You have {len(tasks)} {_TASK_PROMPT_MARKER}:\n\n"
+    for i, task in enumerate(tasks, 1):
+        again = REDELIVERY_NOTE if task.get("redelivered") else ""
+        out += f"--- [{i}] from {task.get('from_agent')}{again} ---\n{task.get('payload')}\n\n"
+    return out
 
 # Backoff between retries of a turn that failed for INFRA reasons (provider down,
 # billing, network). Grows per consecutive miss so a sustained outage doesn't
@@ -406,6 +432,9 @@ class AgentDaemon:
         self.inbox = InboxQueue(db_path)
         # Recover messages stranded 'processing' by a previous run (crash/restart).
         recovered = self.inbox.recover_processing()
+        # Kept so the server's startup event can report how much in-flight work
+        # this boot resumed (and will therefore redeliver).
+        self.recovered_on_boot = recovered
         if recovered:
             log.info("[%s] Recovered %d in-flight message(s) from previous run", name, recovered)
 
@@ -2267,9 +2296,7 @@ class AgentDaemon:
             "timestamp": time.time(),
         })
 
-        combined = f"You have {len(tasks)} {_TASK_PROMPT_MARKER}:\n\n"
-        for i, task in enumerate(tasks, 1):
-            combined += f"--- [{i}] from {task['from_agent']} ---\n{task['payload']}\n\n"
+        combined = build_batch_prompt(tasks)
 
         # Deliver passive STATUS/FYI addressed to this agent since its last
         # delivery. These never wake anyone (that's the point), but parking them
@@ -2428,6 +2455,10 @@ class AgentDaemon:
             # estimate. (Hermes' estimated_cost_usd is always 0 for proxy
             # models, so pricing lives teams-side: see MODEL_PRICES_PER_MILLION
             # and the /teams/{id}/costs endpoint.)
+            # Defaulted OUTSIDE the try so the cost-breakdown log below can't
+            # NameError if this block raises before they're assigned.
+            turn_in = 0
+            turn_cache = 0
             try:
                 total = int(response.get("total_tokens", 0) or 0)
                 inp = int(response.get("input_tokens", 0) or 0)
@@ -2501,6 +2532,39 @@ class AgentDaemon:
                 if msg.get("role") == "user" and _TASK_PROMPT_MARKER in (msg.get("content") or ""):
                     last_user_idx = i
             turn_messages = new_messages[last_user_idx + 1 :] if last_user_idx >= 0 else new_messages
+
+            # Decompose this turn's input cost. turn_input_tokens ALONE is
+            # ambiguous and actively misleading: an agentic turn re-sends the
+            # whole context on every tool-call iteration, so a 3-tool turn bills
+            # roughly 3x its context size. Reading a large turn_input_tokens as
+            # "my context is huge" is wrong when the real cause is "I made many
+            # calls" — and the two need opposite fixes (trim history vs. batch
+            # tool use). So log the divisor next to the total.
+            #
+            # Counted over turn_messages, NOT new_messages: the latter is the
+            # FULL session history (that's why it gets sliced above), so counting
+            # it would divide by every call the session ever made.
+            try:
+                api_calls = sum(
+                    1 for m in turn_messages
+                    if isinstance(m, dict) and m.get("role") == "assistant"
+                )
+                if api_calls:
+                    monitor_db.log_event(
+                        self.name, "turn_cost_breakdown",
+                        data={
+                            "api_calls": api_calls,
+                            "turn_input_tokens": turn_in,
+                            "input_tokens_per_call": round(turn_in / api_calls),
+                            "turn_cache_read_tokens": turn_cache,
+                            # Near 0 right after a restart: the prompt cache is
+                            # cold, so the first turn back pays full price for
+                            # context it had already paid to cache.
+                            "cache_hit_ratio": round(turn_cache / turn_in, 3) if turn_in else 0,
+                        },
+                    )
+            except Exception as e:
+                log.debug("[%s] turn cost breakdown failed: %s", self.name, e)
 
             # Record the actual turn INPUTS so History is a faithful transcript,
             # not just the agent's replies: the injected system context (only when

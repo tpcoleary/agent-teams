@@ -26,7 +26,8 @@ class InboxQueue:
         status       TEXT NOT NULL DEFAULT 'pending',
         created_at   REAL NOT NULL,
         processed_at REAL,
-        retries      INTEGER NOT NULL DEFAULT 0
+        retries      INTEGER NOT NULL DEFAULT 0,
+        redelivered  INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status, created_at);
     """
@@ -48,10 +49,14 @@ class InboxQueue:
     def _init_db(self):
         with self._conn() as conn:
             conn.executescript(self.SCHEMA)
-            # Migrate older DBs that predate the retries column.
+            # Migrate older DBs that predate later columns.
             cols = [c[1] for c in conn.execute("PRAGMA table_info(messages)").fetchall()]
             if "retries" not in cols:
                 conn.execute("ALTER TABLE messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0")
+            if "redelivered" not in cols:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN redelivered INTEGER NOT NULL DEFAULT 0"
+                )
             conn.commit()
 
     def enqueue(self, from_agent: str, payload: str) -> str:
@@ -91,7 +96,8 @@ class InboxQueue:
         into a single LLM turn so a flood can't blow the context window.
         """
         with self._lock, self._conn() as conn:
-            sql = "SELECT id, from_agent, payload, retries FROM messages WHERE status='pending' ORDER BY created_at"
+            sql = ("SELECT id, from_agent, payload, retries, redelivered FROM messages "
+                   "WHERE status='pending' ORDER BY created_at")
             if limit and limit > 0:
                 sql += f" LIMIT {int(limit)}"
             rows = conn.execute(sql).fetchall()
@@ -103,7 +109,8 @@ class InboxQueue:
                     [time.time()] + ids,
                 )
                 conn.commit()
-        return [{"id": r[0], "from_agent": r[1], "payload": r[2], "retries": r[3]} for r in rows]
+        return [{"id": r[0], "from_agent": r[1], "payload": r[2], "retries": r[3],
+                 "redelivered": r[4]} for r in rows]
 
     def mark_done(self, task_id: str):
         with self._lock, self._conn() as conn:
@@ -111,13 +118,19 @@ class InboxQueue:
             conn.commit()
 
     def requeue(self, task_ids: List[str]):
-        """Return messages to 'pending' and bump their retry counter (after a failure)."""
+        """Return messages to 'pending' and bump their retry counter (after a failure).
+
+        Also bumps ``redelivered``: the turn may have already run tool calls
+        before it failed, so the agent must be told it might be seeing this
+        work a second time.
+        """
         if not task_ids:
             return
         with self._lock, self._conn() as conn:
             placeholders = ",".join("?" * len(task_ids))
             conn.execute(
-                f"UPDATE messages SET status='pending', processed_at=NULL, retries=retries+1 "
+                f"UPDATE messages SET status='pending', processed_at=NULL, retries=retries+1, "
+                f"redelivered=redelivered+1 "
                 f"WHERE id IN ({placeholders})",
                 task_ids,
             )
@@ -128,13 +141,17 @@ class InboxQueue:
 
         Used for infrastructure failures (LLM proxy down, billing exhausted)
         that are not the task's fault — the work should wait for recovery and
-        resume, not burn its retry budget and dead-letter during an outage."""
+        resume, not burn its retry budget and dead-letter during an outage.
+
+        ``redelivered`` IS still bumped: not burning the retry budget is about
+        blame, whereas redelivery is about what the agent has already seen."""
         if not task_ids:
             return
         with self._lock, self._conn() as conn:
             placeholders = ",".join("?" * len(task_ids))
             conn.execute(
-                f"UPDATE messages SET status='pending', processed_at=NULL "
+                f"UPDATE messages SET status='pending', processed_at=NULL, "
+                f"redelivered=redelivered+1 "
                 f"WHERE id IN ({placeholders})",
                 task_ids,
             )
@@ -193,12 +210,20 @@ class InboxQueue:
         behavior deleted the DB) or strand them forever in 'processing'.
         Returns the count recovered.
 
+        Bumps ``redelivered`` so the next batch can TELL the agent it has seen
+        these before. Without that marker a resumed operator instruction reads
+        as a brand-new request, and the agent plausibly redoes work it already
+        did (creating a duplicate round of tasks). retries is deliberately NOT
+        bumped here — a restart is not the message's fault — which is precisely
+        why redelivery needs its own counter.
+
         Also runs a bounded retention sweep (``prune_terminal``) at startup so
         terminal rows don't accumulate forever across a 24/7 run.
         """
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "UPDATE messages SET status='pending', processed_at=NULL WHERE status='processing'"
+                "UPDATE messages SET status='pending', processed_at=NULL, "
+                "redelivered=redelivered+1 WHERE status='processing'"
             )
             conn.commit()
             recovered = cur.rowcount or 0

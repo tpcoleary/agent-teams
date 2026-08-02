@@ -1558,6 +1558,18 @@ function handleWS(msg) {
             break;
         case 'error': logEvent('error', `${payload.agent_name}: ${payload.error?.slice(0, 100)}`); break;
         case 'soul_updated': logEvent('system', `${payload.agent_name} soul updated`); break;
+        // Makes a silence window self-explaining: a gap that starts here was a
+        // restart, not a stalled scheduler.
+        case 'server_started': {
+            const resumed = payload.resumed_messages
+                ? `, resumed ${payload.resumed_messages} in-flight message(s)`
+                : '';
+            logEvent('system', `⟳ server started (v${payload.version || '?'}, ${payload.agents || 0} agents${resumed})`);
+            break;
+        }
+        case 'server_stopped':
+            logEvent('system', `⏹ server stopped (up ${fmtDuration(payload.uptime_seconds || 0)})`);
+            break;
         case 'task_created':
             tasksStore.set(payload.id, payload);
             logEvent('system', `${payload.created_by} created task '${payload.title}' → ${payload.assigned_to}`);
@@ -2795,6 +2807,15 @@ async function postSetup(body) {
 function fmtMsgTime(ts) {
     const d = ts ? new Date(ts * 1000) : new Date();
     return d.toLocaleTimeString([], { hour12: false });
+}
+
+// '45s' / '47m' / '3h12m' — mirrors the compact age format the server uses for
+// sweep ledger lines, with a seconds case since a restart can be seconds apart.
+function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(seconds || 0));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
 }
 
 // Shared renderer for a single transcript entry (used by initial load + live

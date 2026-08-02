@@ -159,6 +159,28 @@ async def _periodic_loop_detector():
             log.warning("[LoopDetector] sweep error: %s", e)
 
 
+def build_boot_summary(daemon_map: Dict[str, Any]) -> Dict[str, Any]:
+    """Facts about this process for the `server_started` event.
+
+    `resumed_messages` is the count of in-flight messages that
+    recover_processing() handed back to agents on construction — i.e. the work
+    this boot will REDELIVER (see InboxQueue.recover_processing). It is read from
+    each daemon's recovered_on_boot rather than from a live pending count,
+    because pending also includes messages that arrived normally and were never
+    interrupted.
+    """
+    import os
+
+    return {
+        "pid": os.getpid(),
+        "version": __version__,
+        "agents": len(daemon_map),
+        "resumed_messages": sum(
+            getattr(d, "recovered_on_boot", 0) or 0 for d in daemon_map.values()
+        ),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ---- startup ----
@@ -219,10 +241,34 @@ async def lifespan(app: FastAPI):
         log.info("[Startup] All agents running.")
     log.info("[Startup] Dashboard at http://%s:%s/", SERVER_HOST, SERVER_PORT)
 
+    # Record the process boundary in monitoring.db. Without this, a restart is
+    # INDISTINGUISHABLE from a scheduler stall: both look like a silent gap in
+    # the event stream, and diagnosing one meant reaching for teams.pid's mtime.
+    import time as _time
+    from teams_server.websocket import _broadcast as _ws_broadcast
+
+    _started_at = _time.time()
+    try:
+        _boot = build_boot_summary(daemons)
+        monitor_db.log_event("system", "server_started", data=_boot)
+        _ws_broadcast("server_started", {**_boot, "timestamp": _started_at})
+    except Exception as e:
+        log.warning("[Startup] could not log server_started: %s", e)
+
     try:
         yield
     finally:
         # ---- shutdown ----
+        # Logged so a CLEAN stop is distinguishable from a crash: a gap preceded
+        # by server_stopped was intentional, a gap with no server_stopped before
+        # the next server_started was not.
+        try:
+            monitor_db.log_event("system", "server_stopped", data={
+                "uptime_seconds": round(_time.time() - _started_at, 1),
+                "agents": len(daemons),
+            })
+        except Exception as e:
+            log.warning("[Shutdown] could not log server_stopped: %s", e)
         prune_task.cancel()
         digest_task.cancel()
         loopdet_task.cancel()
