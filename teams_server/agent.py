@@ -588,6 +588,14 @@ class AgentDaemon:
             self._passive_watermark = monitor_db.get_latest_event_id()
         except Exception:
             self._passive_watermark = 0
+        # LLM Observability: per-turn trace id (returned by start_llm_trace)
+        # and the accumulated step list that is flushed to monitoring.db at
+        # turn end. Reset each turn in _process_tasks_batch.
+        self._current_trace_id: int = 0
+        self._current_trace_steps: List[Dict[str, Any]] = []
+        # trigger type for the current turn ("task", "heartbeat", "cron", …).
+        # Set by _process_tasks_batch before submitting to the executor.
+        self._current_trigger_type: str = "task"
 
     @staticmethod
     def _resolve_sweep_interval(cfg: Dict[str, Any]) -> float:
@@ -2166,10 +2174,24 @@ class AgentDaemon:
         """
         def on_thinking(text: str = "") -> None:
             self._emit_exec("thinking", {"text": (text or "")[:200]})
+            try:
+                self._current_trace_steps.append({
+                    "type": "thinking", "ts": time.time(),
+                    "text": (text or "")[:500],
+                })
+            except Exception:
+                pass
 
         def on_reasoning(text: str = "") -> None:
             if text:
                 self._emit_exec("reasoning", {"text": str(text)[:4000]})
+                try:
+                    self._current_trace_steps.append({
+                        "type": "reasoning", "ts": time.time(),
+                        "text": str(text)[:1000],
+                    })
+                except Exception:
+                    pass
 
         def on_tool_start(tool_call_id, name, args) -> None:
             try:
@@ -2179,12 +2201,28 @@ class AgentDaemon:
             self._emit_exec("tool_start", {
                 "id": str(tool_call_id), "name": str(name), "args": (args_str or "")[:1500],
             })
+            try:
+                self._current_trace_steps.append({
+                    "type": "tool_start", "ts": time.time(),
+                    "id": str(tool_call_id), "name": str(name),
+                    "args": (args_str or "")[:500],
+                })
+            except Exception:
+                pass
 
         def on_tool_complete(tool_call_id, name, args, result) -> None:
             self._emit_exec("tool_result", {
                 "id": str(tool_call_id), "name": str(name),
                 "result": ("" if result is None else str(result))[:2000],
             })
+            try:
+                self._current_trace_steps.append({
+                    "type": "tool_result", "ts": time.time(),
+                    "id": str(tool_call_id), "name": str(name),
+                    "result": ("" if result is None else str(result))[:1000],
+                })
+            except Exception:
+                pass
             # Persist a compact step to monitoring.db AS IT HAPPENS (independent of
             # whether a dashboard is connected). Without this, a turn's activity is
             # invisible to digests + the supervisor until it COMPLETES — so a long
@@ -2239,6 +2277,8 @@ class AgentDaemon:
             getattr(self, "_project_dir", None)
             or _ensure_project_dir(self.cfg.get("team_id", "default"))
         )
+        turn_start = time.time()
+        trace_id = 0
         try:
             self._ensure_agent()
             # Heal a crashed team browser before the turn. Relaunch reuses the
@@ -2254,6 +2294,7 @@ class AgentDaemon:
             # ephemeral_system_prompt pinned to the STABLE base (so [system + tools +
             # history] is a byte-stable cacheable prefix) and prepend the volatile
             # live context to the FINAL user turn, where it costs only its own tokens.
+            live_ctx = ""
             try:
                 base = getattr(self, "_base_ephemeral", None)
                 if base is not None:
@@ -2261,11 +2302,11 @@ class AgentDaemon:
                     # as base+live by an older build / prior turn).
                     if self._ai_agent.ephemeral_system_prompt != base:
                         self._ai_agent.ephemeral_system_prompt = base
-                    live = compose_live_context(
+                    live_ctx = compose_live_context(
                         self.cfg.get("team_id", "default"), self.name, load_agents_config()
                     )
-                    if live:
-                        combined = f"{live}\n\n{combined}"
+                    if live_ctx:
+                        combined = f"{live_ctx}\n\n{combined}"
             except Exception as e:
                 log.debug("[%s] live-context refresh failed: %s", self.name, e)
             history = self._load_session_from_db()
@@ -2280,11 +2321,71 @@ class AgentDaemon:
                 self._emit_exec("user", {"text": (combined or "")[:6000]})
             except Exception:
                 pass
-            return self._ai_agent.run_conversation(
+
+            # --- Observability: start trace before the LLM call -----------------
+            try:
+                tools_count = len(getattr(self._ai_agent, "tools", []) or [])
+                history_json = json.dumps(history, default=str)
+                # The task-prompt portion is combined *before* live context was
+                # prepended, but we already prepended it above. Reconstruct:
+                base_prompt = combined[len(live_ctx):].lstrip() if live_ctx else combined
+                trace_id = monitor_db.start_llm_trace(
+                    agent_name=self.name,
+                    team_id=self.cfg.get("team_id", "default"),
+                    turn_id=getattr(self, "_current_turn_id", ""),
+                    trigger_type=getattr(self, "_current_trigger_type", "task"),
+                    task_ids=",".join(getattr(self, "_current_task_ids", []) or []),
+                    model=self._current_model,
+                    provider=self._current_provider,
+                    system_prompt=getattr(self._ai_agent, "ephemeral_system_prompt", "") or "",
+                    live_context=live_ctx,
+                    user_prompt=base_prompt,
+                    history_json=history_json,
+                    history_len=len(history),
+                    tools_count=tools_count,
+                )
+                self._current_trace_id = trace_id
+            except Exception as e:
+                log.debug("[%s] start_llm_trace failed: %s", self.name, e)
+
+            result = self._ai_agent.run_conversation(
                 user_message=combined,
                 task_id=f"agent_name:{self.name}",
                 conversation_history=history,
             )
+
+            # --- Observability: complete trace after the LLM call ---------------
+            try:
+                if trace_id:
+                    monitor_db.complete_llm_trace(
+                        trace_id=trace_id,
+                        final_response=str(result.get("final_response", ""))[:8000],
+                        duration_seconds=round(time.time() - turn_start, 3),
+                        status="error" if result.get("failed") else "completed",
+                        steps_json=json.dumps(
+                            getattr(self, "_current_trace_steps", []), default=str
+                        ),
+                    )
+            except Exception as e:
+                log.debug("[%s] complete_llm_trace (pre-token) failed: %s", self.name, e)
+
+            return result
+        except Exception as exc:  # noqa: BLE001
+            # Mark a trace that threw an exception as error
+            try:
+                if trace_id:
+                    monitor_db.complete_llm_trace(
+                        trace_id=trace_id,
+                        final_response="",
+                        duration_seconds=round(time.time() - turn_start, 3),
+                        status="error",
+                        steps_json=json.dumps(
+                            getattr(self, "_current_trace_steps", []), default=str
+                        ),
+                    )
+            except Exception:
+                pass
+            raise
         finally:
             _reset_hermes_home_override(token)
             _reset_terminal_cwd_override()
@@ -2299,6 +2400,24 @@ class AgentDaemon:
         # against this set so a COMPLETED turn isn't double-written.
         self._current_task_ids = task_ids
         self._live_logged_tool_ids = set()
+        # LLM observability: reset per-turn trace accumulators.
+        self._current_trace_id = 0
+        self._current_trace_steps = []
+        # Derive trigger type from the first task's source agent name.
+        first_src = (tasks[0].get("from_agent") or "") if tasks else ""
+        if first_src == "autonomous":
+            self._current_trigger_type = "heartbeat"
+        elif first_src == "cron":
+            self._current_trigger_type = "cron"
+        elif first_src == "supervisor-sweep":
+            self._current_trigger_type = "supervisor"
+        elif first_src == "human":
+            self._current_trigger_type = "human"
+        else:
+            self._current_trigger_type = "task"
+        # Stable turn id ties the trace row to a specific turn in the transcript.
+        import uuid as _uuid
+        self._current_turn_id = _uuid.uuid4().hex[:16]
         log.info("[%s] Processing batch: %s", self.name, task_preview)
         _broadcast("conversation_start", {
             "agent_name": self.name,
@@ -2511,6 +2630,42 @@ class AgentDaemon:
                     self.cfg.get("team_id", "default"), self._current_model,
                     turn_in, turn_out, turn_cache,
                     provider=self._current_provider, base_url=self._current_base_url)
+
+                # Patch real token counts onto the trace row now that we have them.
+                tid = getattr(self, "_current_trace_id", 0)
+                if tid:
+                    try:
+                        from teams_server.model_config import estimate_cost_usd
+                        cost = estimate_cost_usd(
+                            self._current_model, turn_in, turn_out, turn_cache,
+                            provider=self._current_provider,
+                            base_url=self._current_base_url,
+                        ) or 0.0
+                    except Exception:
+                        cost = 0.0
+                    try:
+                        with monitor_db._conn() as _c:
+                            _c.execute(
+                                "UPDATE llm_traces SET tokens_in=?, tokens_out=?,"
+                                " cost_usd=? WHERE id=?",
+                                (turn_in, turn_out, cost, tid),
+                            )
+                            _c.commit()
+                    except Exception as _te:
+                        log.debug("[%s] llm_trace token patch failed: %s", self.name, _te)
+                    # Broadcast so the dashboard trace list updates live.
+                    _broadcast("trace_completed", {
+                        "agent_name": self.name,
+                        "team_id": self.cfg.get("team_id", "default"),
+                        "trace_id": tid,
+                        "turn_id": getattr(self, "_current_turn_id", ""),
+                        "trigger_type": getattr(self, "_current_trigger_type", "task"),
+                        "model": self._current_model,
+                        "tokens_in": turn_in,
+                        "tokens_out": turn_out,
+                        "cost_usd": cost,
+                        "timestamp": time.time(),
+                    })
             except Exception as e:
                 log.debug("[%s] token usage logging failed: %s", self.name, e)
 

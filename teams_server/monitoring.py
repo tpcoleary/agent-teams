@@ -107,6 +107,33 @@ class MonitoringDB:
         covers_to_decision  INTEGER
     );
 
+    -- Full LLM API call traces: one row per agent turn, capturing inputs sent
+    -- to the model and outputs received, for the Observability dashboard.
+    CREATE TABLE IF NOT EXISTS llm_traces (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp         REAL    NOT NULL,
+        agent_name        TEXT    NOT NULL,
+        team_id           TEXT    NOT NULL,
+        turn_id           TEXT    NOT NULL,
+        task_ids          TEXT,
+        trigger_type      TEXT    NOT NULL,
+        model             TEXT,
+        provider          TEXT,
+        system_prompt     TEXT,
+        live_context      TEXT,
+        user_prompt       TEXT,
+        history_json      TEXT,
+        history_len       INTEGER,
+        tools_count       INTEGER,
+        steps_json        TEXT,
+        final_response    TEXT,
+        duration_seconds  REAL,
+        tokens_in         INTEGER,
+        tokens_out        INTEGER,
+        cost_usd          REAL,
+        status            TEXT    NOT NULL DEFAULT 'running'
+    );
+
     CREATE INDEX IF NOT EXISTS idx_events_agent     ON events(agent_name);
     CREATE INDEX IF NOT EXISTS idx_events_time      ON events(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_events_type      ON events(event_type);
@@ -118,12 +145,16 @@ class MonitoringDB:
     CREATE INDEX IF NOT EXISTS idx_deleg_msg        ON delegations(msg_id);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_actions_key ON actions(team_id, idempotency_key);
     CREATE INDEX IF NOT EXISTS idx_milestones_team  ON milestones(team_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_traces_agent     ON llm_traces(agent_name, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_traces_team      ON llm_traces(team_id, timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_traces_turn      ON llm_traces(turn_id);
     """
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._init_db()
         self._migrate_add_team_id()
+        self._migrate_add_llm_traces()
 
     def _conn(self):
         conn = sqlite3.connect(str(self.db_path), timeout=10, check_same_thread=False)
@@ -171,6 +202,45 @@ class MonitoringDB:
                 conn.commit()
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_team ON messages(team_id)")
             conn.commit()
+
+    def _migrate_add_llm_traces(self) -> None:
+        """Create llm_traces table if the DB was created before the observability schema."""
+        with self._conn() as conn:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            if "llm_traces" not in tables:
+                log.info("[MonitoringDB] Migrating: creating llm_traces table")
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS llm_traces (
+                        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp         REAL    NOT NULL,
+                        agent_name        TEXT    NOT NULL,
+                        team_id           TEXT    NOT NULL,
+                        turn_id           TEXT    NOT NULL,
+                        task_ids          TEXT,
+                        trigger_type      TEXT    NOT NULL,
+                        model             TEXT,
+                        provider          TEXT,
+                        system_prompt     TEXT,
+                        live_context      TEXT,
+                        user_prompt       TEXT,
+                        history_json      TEXT,
+                        history_len       INTEGER,
+                        tools_count       INTEGER,
+                        steps_json        TEXT,
+                        final_response    TEXT,
+                        duration_seconds  REAL,
+                        tokens_in         INTEGER,
+                        tokens_out        INTEGER,
+                        cost_usd          REAL,
+                        status            TEXT    NOT NULL DEFAULT 'running'
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_traces_agent ON llm_traces(agent_name, timestamp DESC);
+                    CREATE INDEX IF NOT EXISTS idx_traces_team  ON llm_traces(team_id, timestamp DESC);
+                    CREATE INDEX IF NOT EXISTS idx_traces_turn  ON llm_traces(turn_id);
+                """)
+                conn.commit()
 
     def log_event(
         self,
@@ -536,6 +606,17 @@ class MonitoringDB:
                 cur = conn.execute(sql, params)
                 deleted["delegations"] = cur.rowcount or 0
 
+                # llm_traces is keyed by both team_id and agent_name
+                if names:
+                    placeholders = ",".join("?" for _ in names)
+                    sql = f"DELETE FROM llm_traces WHERE team_id=? OR agent_name IN ({placeholders})"
+                    params = [team_id] + names
+                else:
+                    sql = "DELETE FROM llm_traces WHERE team_id=?"
+                    params = [team_id]
+                cur = conn.execute(sql, params)
+                deleted["llm_traces"] = cur.rowcount or 0
+
                 conn.commit()
             if any(deleted.values()):
                 log.info("[MonitorDB] Purged team '%s' records: %s", team_id, deleted)
@@ -554,6 +635,8 @@ class MonitoringDB:
                     deleted[table] = cur.rowcount or 0
                 cur = conn.execute("DELETE FROM delegations WHERE from_agent=? OR to_agent=?", (agent_name, agent_name))
                 deleted["delegations"] = cur.rowcount or 0
+                cur = conn.execute("DELETE FROM llm_traces WHERE agent_name=?", (agent_name,))
+                deleted["llm_traces"] = cur.rowcount or 0
                 conn.commit()
             if any(deleted.values()):
                 log.info("[MonitorDB] Purged agent '%s' records: %s", agent_name, deleted)
@@ -996,6 +1079,217 @@ class MonitoringDB:
                         stats[r["agent_name"]]["total_tokens"] = r["tokens"]
         except Exception as e:
             log.warning("[MonitorDB] Failed to get stats: %s", e)
+        return stats
+
+    # ---- LLM Traces (Observability) ----------------------------------------
+
+    def start_llm_trace(
+        self,
+        agent_name: str,
+        team_id: str,
+        turn_id: str,
+        trigger_type: str,
+        task_ids: str = "",
+        model: str = "",
+        provider: str = "",
+        system_prompt: str = "",
+        live_context: str = "",
+        user_prompt: str = "",
+        history_json: str = "[]",
+        history_len: int = 0,
+        tools_count: int = 0,
+    ) -> int:
+        """Create a 'running' trace row and return its id for later completion."""
+        try:
+            with self._conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO llm_traces (
+                        timestamp, agent_name, team_id, turn_id, task_ids,
+                        trigger_type, model, provider, system_prompt, live_context,
+                        user_prompt, history_json, history_len, tools_count,
+                        steps_json, final_response, duration_seconds,
+                        tokens_in, tokens_out, cost_usd, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        time.time(), agent_name, team_id, turn_id, task_ids,
+                        trigger_type, model, provider, system_prompt, live_context,
+                        user_prompt, history_json, history_len, tools_count,
+                        "[]", "", 0.0, 0, 0, 0.0, "running",
+                    ),
+                )
+                conn.commit()
+                return cur.lastrowid
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to start llm_trace for %s: %s", agent_name, e)
+            return 0
+
+    def complete_llm_trace(
+        self,
+        trace_id: int,
+        final_response: str = "",
+        duration_seconds: float = 0.0,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        cost_usd: float = 0.0,
+        status: str = "completed",
+        steps_json: str = "[]",
+    ) -> None:
+        """Finalize a trace with output, token counts, cost, duration, and steps."""
+        if not trace_id:
+            return
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE llm_traces SET
+                        final_response=?, duration_seconds=?, tokens_in=?,
+                        tokens_out=?, cost_usd=?, status=?, steps_json=?
+                    WHERE id=?
+                    """,
+                    (final_response[:8000], duration_seconds, tokens_in,
+                     tokens_out, cost_usd, status, steps_json, trace_id),
+                )
+                conn.commit()
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to complete llm_trace %s: %s", trace_id, e)
+
+    def get_llm_traces(
+        self,
+        agent_name: Optional[str] = None,
+        team_id: Optional[str] = None,
+        status: Optional[str] = None,
+        trigger_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return trace metadata list — no steps_json or history_json to keep payloads small."""
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                clauses, params = [], []
+                if agent_name:
+                    clauses.append("agent_name = ?")
+                    params.append(agent_name)
+                if team_id:
+                    clauses.append("team_id = ?")
+                    params.append(team_id)
+                if status:
+                    clauses.append("status = ?")
+                    params.append(status)
+                if trigger_type:
+                    clauses.append("trigger_type = ?")
+                    params.append(trigger_type)
+                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                sql = f"""
+                    SELECT id, timestamp, agent_name, team_id, turn_id, task_ids,
+                           trigger_type, model, provider, duration_seconds,
+                           history_len, tools_count,
+                           tokens_in, tokens_out, cost_usd, status,
+                           length(system_prompt)  AS system_prompt_len,
+                           length(live_context)   AS live_context_len,
+                           length(user_prompt)    AS user_prompt_len,
+                           substr(final_response, 1, 300) AS response_preview,
+                           json_array_length(CASE WHEN steps_json IS NULL OR steps_json = '' THEN '[]'
+                                             ELSE steps_json END) AS step_count
+                    FROM llm_traces{where}
+                    ORDER BY timestamp DESC
+                    LIMIT ? OFFSET ?
+                """
+                params.extend([max(1, min(limit, 500)), max(0, offset)])
+                rows = conn.execute(sql, tuple(params)).fetchall()
+                return [dict(r) for r in rows]
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to get llm_traces: %s", e)
+            return []
+
+    def get_llm_trace(self, trace_id: Any) -> Optional[Dict[str, Any]]:
+        """Fetch the full, untruncated details of a single trace including history and steps."""
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                if isinstance(trace_id, int) or (
+                    isinstance(trace_id, str) and trace_id.isdigit()
+                ):
+                    row = conn.execute(
+                        "SELECT * FROM llm_traces WHERE id = ?", (int(trace_id),)
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM llm_traces WHERE turn_id = ? ORDER BY id DESC LIMIT 1",
+                        (str(trace_id),),
+                    ).fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                # Parse JSON fields for API consumers
+                for key, default in (("history_json", []), ("steps_json", [])):
+                    try:
+                        d[key] = json.loads(d.get(key) or json.dumps(default))
+                    except Exception:
+                        d[key] = default
+                return d
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to get llm_trace %s: %s", trace_id, e)
+            return None
+
+    def get_observability_stats(
+        self, team_id: Optional[str] = None, agent_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Aggregate stats over llm_traces (total turns, tokens, costs, trigger distribution)."""
+        stats: Dict[str, Any] = {
+            "total_turns": 0, "total_tokens_in": 0, "total_tokens_out": 0,
+            "total_cost_usd": 0.0, "avg_duration_seconds": 0.0,
+            "status_counts": {}, "trigger_counts": {}, "model_counts": {},
+            "recent_error_rate": 0.0,
+        }
+        try:
+            with self._conn() as conn:
+                conn.row_factory = sqlite3.Row
+                clauses, params = [], []
+                if team_id:
+                    clauses.append("team_id = ?")
+                    params.append(team_id)
+                if agent_name:
+                    clauses.append("agent_name = ?")
+                    params.append(agent_name)
+                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                agg = conn.execute(
+                    f"SELECT COUNT(*) as total, COALESCE(SUM(tokens_in),0) as tot_in,"
+                    f" COALESCE(SUM(tokens_out),0) as tot_out,"
+                    f" COALESCE(SUM(cost_usd),0.0) as tot_cost,"
+                    f" COALESCE(AVG(duration_seconds),0.0) as avg_dur"
+                    f" FROM llm_traces{where}",
+                    tuple(params),
+                ).fetchone()
+                if agg:
+                    stats["total_turns"] = agg["total"]
+                    stats["total_tokens_in"] = agg["tot_in"]
+                    stats["total_tokens_out"] = agg["tot_out"]
+                    stats["total_cost_usd"] = round(agg["tot_cost"], 4)
+                    stats["avg_duration_seconds"] = round(agg["avg_dur"], 2)
+                for r in conn.execute(
+                    f"SELECT status, COUNT(*) c FROM llm_traces{where} GROUP BY status",
+                    tuple(params),
+                ).fetchall():
+                    stats["status_counts"][r["status"]] = r["c"]
+                for r in conn.execute(
+                    f"SELECT trigger_type, COUNT(*) c FROM llm_traces{where} GROUP BY trigger_type",
+                    tuple(params),
+                ).fetchall():
+                    stats["trigger_counts"][r["trigger_type"]] = r["c"]
+                for r in conn.execute(
+                    f"SELECT COALESCE(model,'?') mdl, COUNT(*) c"
+                    f" FROM llm_traces{where} GROUP BY model",
+                    tuple(params),
+                ).fetchall():
+                    stats["model_counts"][r["mdl"]] = r["c"]
+                if stats["total_turns"] > 0:
+                    errors = stats["status_counts"].get("error", 0)
+                    stats["recent_error_rate"] = round(100.0 * errors / stats["total_turns"], 1)
+        except Exception as e:
+            log.warning("[MonitorDB] Failed to get observability stats: %s", e)
         return stats
 
 

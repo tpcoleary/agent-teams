@@ -2043,6 +2043,42 @@ async def monitoring_recent(limit: int = 100):
 
 
 # ---------------------------------------------------------------------------
+# Observability — LLM Trace endpoints
+# One row per agent turn: full system prompt, conversation history, tool steps,
+# token counts, cost, and duration. Designed for the Observability dashboard.
+# ---------------------------------------------------------------------------
+
+@app.get("/observability/traces")
+async def observability_traces(
+    agent_name: str = None,
+    team_id: str = None,
+    status: str = None,
+    trigger_type: str = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    traces = monitor_db.get_llm_traces(
+        agent_name=agent_name, team_id=team_id, status=status,
+        trigger_type=trigger_type, limit=limit, offset=offset,
+    )
+    return JSONResponse({"traces": traces, "count": len(traces)})
+
+
+@app.get("/observability/traces/{trace_id}")
+async def observability_trace_detail(trace_id: str):
+    trace = monitor_db.get_llm_trace(trace_id)
+    if trace is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"trace": trace})
+
+
+@app.get("/observability/stats")
+async def observability_stats(team_id: str = None, agent_name: str = None):
+    stats = monitor_db.get_observability_stats(team_id=team_id, agent_name=agent_name)
+    return JSONResponse({"stats": stats, "timestamp": time.time()})
+
+
+# ---------------------------------------------------------------------------
 # Tasks — the human-meaningful work tracker (teams_server/tasks_db.py),
 # distinct from the per-agent message inbox above.
 # ---------------------------------------------------------------------------

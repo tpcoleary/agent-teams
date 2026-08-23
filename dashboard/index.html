@@ -194,6 +194,51 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 /* Tasks page (full-viewport, toggled in place of #stage/#left-col/.ov-right/#event-log) */
 #tasks-page { display: none; position: fixed; top: var(--topbar-h); left: 0; right: 0; bottom: 0; overflow: auto; background: var(--bg); padding: 16px; z-index: 40; }
 #tasks-page.open { display: block; }
+/* Observability page */
+#obs-page { display: none; position: fixed; top: var(--topbar-h); left: 0; right: 0; bottom: 0; background: var(--bg); z-index: 40; flex-direction: row; overflow: hidden; }
+#obs-page.open { display: flex; }
+.obs-list-col { width: 360px; min-width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+.obs-detail-col { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.obs-toolbar { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 7px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+.obs-filter-select { background: var(--bg-input); border: 1px solid var(--border); color: var(--text); border-radius: var(--r-sm); padding: 3px 7px; font-size: 11px; outline: none; }
+.obs-filter-select:focus { border-color: var(--accent); }
+.obs-list { flex: 1; overflow-y: auto; }
+.obs-trace-row { padding: 10px 13px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.12s; }
+.obs-trace-row:hover { background: var(--bg-hover); }
+.obs-trace-row.active { background: var(--accent-soft); border-left: 3px solid var(--accent); }
+.obs-trace-agent { font-size: 12px; font-weight: 600; color: var(--text); }
+.obs-trace-meta { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+.obs-trace-preview { font-size: 11px; color: var(--text-secondary); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-status-badge { display: inline-block; padding: 1px 6px; border-radius: var(--r-sm); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; }
+.obs-status-badge.running { background: rgba(91,157,255,0.18); color: #5b9dff; }
+.obs-status-badge.completed { background: rgba(62,207,142,0.18); color: #3ecf8e; }
+.obs-status-badge.error { background: rgba(245,101,101,0.18); color: #f56565; }
+.obs-trigger-badge { display: inline-block; padding: 1px 5px; border-radius: var(--r-sm); font-size: 9px; font-weight: 600; text-transform: uppercase; background: var(--bg-input); border: 1px solid var(--border); color: var(--text-muted); }
+.obs-detail-header { padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.obs-detail-meta-row { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); margin-top: 7px; }
+.obs-detail-meta-val { color: var(--text); font-weight: 600; }
+.obs-section { margin: 14px 18px; }
+.obs-section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.13em; color: var(--text-muted); margin-bottom: 7px; display: flex; align-items: center; gap: 8px; }
+.obs-section-title button { background: none; border: 1px solid var(--border); color: var(--text-muted); border-radius: var(--r-sm); font-size: 9px; padding: 1px 7px; cursor: pointer; }
+.obs-code-block { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); padding: 11px 14px; font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; line-height: 1.65; color: var(--text-secondary); max-height: 320px; overflow-y: auto; }
+.obs-step-list { display: flex; flex-direction: column; gap: 6px; }
+.obs-step { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+.obs-step-header { padding: 7px 11px; display: flex; align-items: center; gap: 8px; font-size: 11px; cursor: pointer; user-select: none; }
+.obs-step-header:hover { background: var(--bg-hover); }
+.obs-step-type { font-size: 9px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; border-radius: var(--r-sm); }
+.obs-step-type.tool_start { background: rgba(167,130,255,0.18); color: #a782ff; }
+.obs-step-type.tool_result { background: rgba(62,207,142,0.18); color: #3ecf8e; }
+.obs-step-type.thinking { background: rgba(251,189,56,0.18); color: #fbbd38; }
+.obs-step-type.reasoning { background: rgba(91,157,255,0.18); color: #5b9dff; }
+.obs-step-name { font-weight: 600; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-step-body { padding: 8px 11px; font-family: var(--font-mono); font-size: 11px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; background: var(--bg-raised); border-top: 1px solid var(--border); display: none; }
+.obs-step-body.expanded { display: block; }
+.obs-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.obs-stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 13px; }
+.obs-stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 3px; }
+.obs-stat-val { font-size: 18px; font-weight: 700; color: var(--text); }
+.obs-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); gap: 10px; padding: 40px; text-align: center; }
+.obs-empty-icon { opacity: 0.3; }
 .tasks-board { display: flex; gap: 14px; align-items: flex-start; height: 100%; }
 .tasks-col { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); min-width: 280px; max-width: 320px; flex-shrink: 0; display: flex; flex-direction: column; max-height: 100%; }
 .tasks-col-header { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
@@ -693,6 +738,7 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     <button id="architect-btn" onclick="toggleMaster()" title="Chat with the Architect — it designs and builds agent teams for you"><span data-icon="compass" data-icon-size="14"></span> <span class="tb-label">Architect</span></button>
     <div class="topbar-right">
         <button id="tasks-btn" class="btn btn-sm btn-secondary" onclick="toggleTasksPage()" aria-label="Open tasks board" title="See what every agent is working on"><span data-icon="check-square" data-icon-size="13"></span> <span class="tb-label">Tasks</span></button>
+        <button id="obs-btn" class="btn btn-sm btn-secondary" onclick="toggleObsPage()" aria-label="Open observability dashboard" title="See everything hitting the LLM API"><span data-icon="eye" data-icon-size="13"></span> <span class="tb-label">Traces</span></button>
         <button id="inbox-btn" class="btn btn-sm btn-secondary" onclick="toggleInbox()" aria-label="Open inbox" style="position:relative;">
             <span data-icon="mail" data-icon-size="13"></span> <span class="tb-label">Inbox</span>
             <span id="inbox-badge" role="status" aria-label="Pending inbox items" style="
@@ -821,6 +867,41 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         </div>
     </div>
     <div class="tasks-board" id="tasks-board"></div>
+</div>
+
+<!-- Observability page (full-viewport, toggled via #obs-btn) -->
+<div id="obs-page">
+    <!-- Left: trace list -->
+    <div class="obs-list-col">
+        <div class="obs-toolbar">
+            <select class="obs-filter-select" id="obs-filter-status" onchange="loadTraces()" title="Filter by status">
+                <option value="">All Status</option>
+                <option value="completed">Completed</option>
+                <option value="running">Running</option>
+                <option value="error">Error</option>
+            </select>
+            <select class="obs-filter-select" id="obs-filter-trigger" onchange="loadTraces()" title="Filter by trigger">
+                <option value="">All Triggers</option>
+                <option value="task">Task</option>
+                <option value="heartbeat">Heartbeat</option>
+                <option value="cron">Cron</option>
+                <option value="supervisor">Supervisor</option>
+                <option value="human">Human</option>
+            </select>
+            <button class="btn btn-sm btn-secondary" onclick="loadTraces()" title="Refresh" style="margin-left:auto"><span data-icon="history" data-icon-size="12"></span></button>
+        </div>
+        <div class="obs-list" id="obs-trace-list">
+            <div class="obs-empty"><div class="obs-empty-icon"><span data-icon="activity" data-icon-size="32"></span></div><div>No traces yet — run an agent turn</div></div>
+        </div>
+    </div>
+    <!-- Right: trace detail -->
+    <div class="obs-detail-col" id="obs-detail-col">
+        <div class="obs-empty" id="obs-detail-empty">
+            <div class="obs-empty-icon"><span data-icon="search" data-icon-size="32"></span></div>
+            <div>Select a trace to inspect</div>
+        </div>
+        <div id="obs-detail-content" style="display:none"></div>
+    </div>
 </div>
 
 <!-- Task Detail/Edit Modal (dashboard-side edit for the Tasks page) -->
@@ -1643,6 +1724,25 @@ function handleWS(msg) {
             }
             if (tasksPageOpen) renderTasksPage();
             break;
+        case 'trace_completed':
+            // Live prepend: add a lightweight row to the obs trace list so the
+            // user sees it without having to click Refresh. Only do this when the
+            // team matches the current filter AND the obs page is open.
+            if (obsPageOpen && (!currentTeam || payload.team_id === currentTeam)) {
+                const stub = {
+                    id: payload.trace_id, timestamp: payload.timestamp,
+                    agent_name: payload.agent_name, team_id: payload.team_id,
+                    turn_id: payload.turn_id, trigger_type: payload.trigger_type,
+                    model: payload.model, status: 'completed',
+                    tokens_in: payload.tokens_in, tokens_out: payload.tokens_out,
+                    cost_usd: payload.cost_usd, duration_seconds: null,
+                    step_count: null, response_preview: '',
+                };
+                obsTraces.unshift(stub);
+                if (obsTraces.length > 100) obsTraces.pop();
+                renderTraceList();
+            }
+            break;
     }
 }
 
@@ -2051,6 +2151,8 @@ const TASK_PRIORITY_LABEL = { 0: 'low', 1: 'normal', 2: 'high', 3: 'urgent' };
 
 function toggleTasksPage() {
     tasksPageOpen = !tasksPageOpen;
+    // Close obs page if open
+    if (obsPageOpen && tasksPageOpen) { obsPageOpen = false; document.getElementById('obs-page').classList.remove('open'); document.getElementById('obs-btn').classList.remove('active'); }
     document.getElementById('tasks-page').classList.toggle('open', tasksPageOpen);
     document.getElementById('stage').style.display = tasksPageOpen ? 'none' : '';
     document.getElementById('left-col').style.display = tasksPageOpen ? 'none' : '';
@@ -2058,6 +2160,212 @@ function toggleTasksPage() {
     document.getElementById('event-log').style.display = tasksPageOpen ? 'none' : '';
     if (tasksPageOpen) loadAllTasks();
 }
+
+/* ===== OBSERVABILITY (LLM Trace Inspector) ===== */
+let obsPageOpen = false;
+let obsTraces = [];
+let obsSelectedTraceId = null;
+
+function toggleObsPage() {
+    obsPageOpen = !obsPageOpen;
+    // Close tasks page if open
+    if (tasksPageOpen && obsPageOpen) { tasksPageOpen = false; document.getElementById('tasks-page').classList.remove('open'); }
+    document.getElementById('obs-page').classList.toggle('open', obsPageOpen);
+    document.getElementById('obs-btn').classList.toggle('active', obsPageOpen);
+    document.getElementById('stage').style.display = obsPageOpen ? 'none' : '';
+    document.getElementById('left-col').style.display = obsPageOpen ? 'none' : '';
+    document.getElementById('ov-right').style.display = obsPageOpen ? 'none' : '';
+    document.getElementById('event-log').style.display = obsPageOpen ? 'none' : '';
+    if (obsPageOpen) loadTraces();
+}
+
+async function loadTraces() {
+    const status = document.getElementById('obs-filter-status').value;
+    const trigger = document.getElementById('obs-filter-trigger').value;
+    let url = `${API_URL}/observability/traces?limit=100`;
+    if (currentTeam) url += `&team_id=${encodeURIComponent(currentTeam)}`;
+    if (status) url += `&status=${encodeURIComponent(status)}`;
+    if (trigger) url += `&trigger_type=${encodeURIComponent(trigger)}`;
+    try {
+        const res = await fetch(url);
+        const d = await res.json();
+        obsTraces = d.traces || [];
+        renderTraceList();
+    } catch (e) {
+        document.getElementById('obs-trace-list').innerHTML = `<div class="obs-empty"><div>Error loading traces: ${esc(e.message)}</div></div>`;
+    }
+}
+
+function renderTraceList() {
+    const list = document.getElementById('obs-trace-list');
+    if (!obsTraces.length) {
+        list.innerHTML = '<div class="obs-empty"><div class="obs-empty-icon"><span data-icon="activity" data-icon-size="32"></span></div><div>No traces yet — run an agent turn</div></div>';
+        applyIcons(list); return;
+    }
+    list.innerHTML = obsTraces.map(t => {
+        const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
+        const dur = t.duration_seconds ? `${t.duration_seconds.toFixed(1)}s` : '';
+        const tokIn = t.tokens_in ? `↑${fmtNum(t.tokens_in)}` : '';
+        const tokOut = t.tokens_out ? `↓${fmtNum(t.tokens_out)}` : '';
+        const cost = t.cost_usd ? `$${Number(t.cost_usd).toFixed(4)}` : '';
+        const isActive = t.id === obsSelectedTraceId ? ' active' : '';
+        return `<div class="obs-trace-row${isActive}" onclick="selectTrace(${t.id})" data-trace-id="${t.id}">
+            <div style="display:flex;align-items:center;gap:6px">
+                <span class="obs-trace-agent">${esc(t.agent_name)}</span>
+                <span class="obs-status-badge ${esc(t.status)}">${esc(t.status)}</span>
+                <span class="obs-trigger-badge">${esc(t.trigger_type)}</span>
+            </div>
+            <div class="obs-trace-meta">
+                <span>${esc(ts)}</span>
+                ${t.model ? `<span>${esc(t.model.split('/').pop())}</span>` : ''}
+                ${dur ? `<span>⏱ ${dur}</span>` : ''}
+                ${tokIn ? `<span>${tokIn} ${tokOut}</span>` : ''}
+                ${cost ? `<span style="color:var(--text-secondary)">${cost}</span>` : ''}
+                ${t.step_count ? `<span>${t.step_count} steps</span>` : ''}
+            </div>
+            ${t.response_preview ? `<div class="obs-trace-preview">${esc(t.response_preview)}</div>` : ''}
+        </div>`;
+    }).join('');
+    applyIcons(list);
+}
+
+function fmtNum(n) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
+
+async function selectTrace(traceId) {
+    obsSelectedTraceId = traceId;
+    // Highlight selected row
+    document.querySelectorAll('.obs-trace-row').forEach(r => {
+        r.classList.toggle('active', Number(r.dataset.traceId) === traceId);
+    });
+    document.getElementById('obs-detail-empty').style.display = 'none';
+    const content = document.getElementById('obs-detail-content');
+    content.style.display = 'block';
+    content.innerHTML = '<div class="obs-empty"><div>Loading…</div></div>';
+    try {
+        const res = await fetch(`${API_URL}/observability/traces/${traceId}`);
+        const d = await res.json();
+        renderTraceDetail(d.trace);
+    } catch (e) {
+        content.innerHTML = `<div class="obs-empty"><div>Error: ${esc(e.message)}</div></div>`;
+    }
+}
+
+function renderTraceDetail(t) {
+    const content = document.getElementById('obs-detail-content');
+    const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString() : '';
+    const dur = t.duration_seconds ? `${t.duration_seconds.toFixed(2)}s` : '—';
+    const steps = Array.isArray(t.steps_json) ? t.steps_json : [];
+    const history = Array.isArray(t.history_json) ? t.history_json : [];
+
+    // Steps HTML
+    const stepsHtml = steps.length ? steps.map((s, i) => {
+        const stype = s.type || 'unknown';
+        let label = stype;
+        let detail = '';
+        if (stype === 'tool_start') { label = s.name || 'tool'; detail = s.args || ''; }
+        else if (stype === 'tool_result') { label = s.name || 'tool'; detail = s.result || ''; }
+        else if (stype === 'thinking') { label = 'thinking'; detail = s.text || ''; }
+        else if (stype === 'reasoning') { label = 'reasoning'; detail = s.text || ''; }
+        const stepTs = s.ts ? new Date(s.ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
+        return `<div class="obs-step">
+            <div class="obs-step-header" onclick="obsToggleStep(this)">
+                <span class="obs-step-type ${esc(stype)}">${esc(stype.replace('_', ' '))}</span>
+                <span class="obs-step-name">${esc(label)}</span>
+                ${stepTs ? `<span style="font-size:10px;color:var(--text-dim);flex-shrink:0">${stepTs}</span>` : ''}
+                <span style="color:var(--text-dim);flex-shrink:0" data-icon="chevron-right" data-icon-size="11"></span>
+            </div>
+            ${detail ? `<div class="obs-step-body">${esc(detail)}</div>` : ''}
+        </div>`;
+    }).join('') : '<div style="color:var(--text-muted);font-size:11px;padding:6px 0">No steps recorded</div>';
+
+    // History summary HTML (collapsible)
+    const histHtml = history.length ? history.map(m => {
+        const role = m.role || '?';
+        const txt = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+        const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length;
+        const badge = {'system':'#5b9dff','user':'#fbbd38','assistant':'#3ecf8e','tool':'#a782ff'}[role] || '#8e8e96';
+        return `<div style="margin-bottom:7px;border-left:3px solid ${badge};padding-left:8px">
+            <span style="font-size:9px;font-weight:700;text-transform:uppercase;color:${badge}">${esc(role)}</span>
+            ${hasTc ? `<span style="font-size:9px;color:var(--text-muted);margin-left:6px">[${m.tool_calls.length} tool call(s)]</span>` : ''}
+            <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word;margin-top:3px;max-height:120px;overflow:auto">${esc((txt || '').slice(0, 1200))}${(txt||'').length > 1200 ? '…' : ''}</div>
+        </div>`;
+    }).join('') : '<div style="color:var(--text-muted);font-size:11px">Empty history (first turn)</div>';
+
+    content.innerHTML = `
+        <div class="obs-detail-header">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <strong style="font-size:14px">${esc(t.agent_name)}</strong>
+                <span class="obs-status-badge ${esc(t.status)}">${esc(t.status)}</span>
+                <span class="obs-trigger-badge">${esc(t.trigger_type)}</span>
+                ${t.model ? `<span style="font-size:11px;color:var(--text-muted)">${esc(t.model)}</span>` : ''}
+            </div>
+            <div class="obs-detail-meta-row">
+                <span>🕐 <span class="obs-detail-meta-val">${esc(ts)}</span></span>
+                <span>⏱ <span class="obs-detail-meta-val">${dur}</span></span>
+                <span>↑ <span class="obs-detail-meta-val">${fmtNum(t.tokens_in || 0)} tok</span></span>
+                <span>↓ <span class="obs-detail-meta-val">${fmtNum(t.tokens_out || 0)} tok</span></span>
+                ${t.cost_usd ? `<span>💰 <span class="obs-detail-meta-val">$${Number(t.cost_usd).toFixed(5)}</span></span>` : ''}
+                <span>📝 <span class="obs-detail-meta-val">${t.history_len || 0} msg history</span></span>
+                <span>🔧 <span class="obs-detail-meta-val">${t.tools_count || 0} tools</span></span>
+                ${t.task_ids ? `<span style="color:var(--text-dim);font-size:10px">tasks: ${esc(t.task_ids.slice(0, 60))}</span>` : ''}
+            </div>
+        </div>
+
+        <div class="obs-section">
+            <div class="obs-section-title">
+                System Prompt <span style="color:var(--text-dim);font-size:9px;font-weight:400">${fmtNum((t.system_prompt||'').length)} chars</span>
+                <button onclick="obsToggleSection('obs-sys-body')">Toggle</button>
+            </div>
+            <div id="obs-sys-body" class="obs-code-block" style="display:none">${esc(t.system_prompt || '(empty)')}</div>
+        </div>
+
+        ${t.live_context ? `<div class="obs-section">
+            <div class="obs-section-title">
+                Live Context <span style="color:var(--text-dim);font-size:9px;font-weight:400">${fmtNum((t.live_context||'').length)} chars</span>
+                <button onclick="obsToggleSection('obs-ctx-body')">Toggle</button>
+            </div>
+            <div id="obs-ctx-body" class="obs-code-block" style="display:none">${esc(t.live_context)}</div>
+        </div>` : ''}
+
+        <div class="obs-section">
+            <div class="obs-section-title">User Prompt <span style="color:var(--text-dim);font-size:9px;font-weight:400">${fmtNum((t.user_prompt||'').length)} chars</span></div>
+            <div class="obs-code-block" style="max-height:200px">${esc(t.user_prompt || '(empty)')}</div>
+        </div>
+
+        <div class="obs-section">
+            <div class="obs-section-title">
+                Conversation History <span style="color:var(--text-dim);font-size:9px;font-weight:400">${history.length} messages sent to model</span>
+                <button onclick="obsToggleSection('obs-hist-body')">Toggle</button>
+            </div>
+            <div id="obs-hist-body" style="display:none">${histHtml}</div>
+        </div>
+
+        <div class="obs-section">
+            <div class="obs-section-title">Execution Steps <span style="color:var(--text-dim);font-size:9px;font-weight:400">${steps.length} steps</span></div>
+            <div class="obs-step-list">${stepsHtml}</div>
+        </div>
+
+        ${t.final_response ? `<div class="obs-section">
+            <div class="obs-section-title">Final Response</div>
+            <div class="obs-code-block">${esc(t.final_response)}</div>
+        </div>` : ''}
+        <div style="height:30px"></div>
+    `;
+    applyIcons(content);
+}
+
+function obsToggleSection(id) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+function obsToggleStep(header) {
+    const body = header.nextElementSibling;
+    if (body && body.classList.contains('obs-step-body')) {
+        body.classList.toggle('expanded');
+    }
+}
+
 
 async function loadAllTasks() {
     const board = document.getElementById('tasks-board');
