@@ -204,7 +204,8 @@ class MonitoringDB:
             conn.commit()
 
     def _migrate_add_llm_traces(self) -> None:
-        """Create llm_traces table if the DB was created before the observability schema."""
+        """Create llm_traces table if the DB was created before the observability schema,
+        and ensure all columns exist if the table was created by an older version."""
         with self._conn() as conn:
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -240,6 +241,38 @@ class MonitoringDB:
                     CREATE INDEX IF NOT EXISTS idx_traces_team  ON llm_traces(team_id, timestamp DESC);
                     CREATE INDEX IF NOT EXISTS idx_traces_turn  ON llm_traces(turn_id);
                 """)
+                conn.commit()
+            else:
+                cursor = conn.execute("PRAGMA table_info(llm_traces)")
+                cols = {c[1] for c in cursor.fetchall()}
+                col_defs = {
+                    "history_len": "INTEGER",
+                    "tools_count": "INTEGER",
+                    "live_context": "TEXT",
+                    "user_prompt": "TEXT",
+                    "history_json": "TEXT",
+                    "steps_json": "TEXT",
+                    "final_response": "TEXT",
+                    "duration_seconds": "REAL",
+                    "tokens_in": "INTEGER",
+                    "tokens_out": "INTEGER",
+                    "cost_usd": "REAL",
+                    "status": "TEXT DEFAULT 'running'",
+                    "trigger_type": "TEXT DEFAULT 'task'",
+                    "model": "TEXT",
+                    "provider": "TEXT",
+                    "system_prompt": "TEXT",
+                    "task_ids": "TEXT",
+                    "turn_id": "TEXT DEFAULT ''",
+                    "team_id": "TEXT DEFAULT 'default'",
+                }
+                for col_name, col_type in col_defs.items():
+                    if col_name not in cols:
+                        log.info("[MonitoringDB] Migrating: adding %s to llm_traces", col_name)
+                        conn.execute(f"ALTER TABLE llm_traces ADD COLUMN {col_name} {col_type}")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_agent ON llm_traces(agent_name, timestamp DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_team  ON llm_traces(team_id, timestamp DESC)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_turn  ON llm_traces(turn_id)")
                 conn.commit()
 
     def log_event(

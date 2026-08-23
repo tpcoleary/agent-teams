@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -2416,8 +2417,7 @@ class AgentDaemon:
         else:
             self._current_trigger_type = "task"
         # Stable turn id ties the trace row to a specific turn in the transcript.
-        import uuid as _uuid
-        self._current_turn_id = _uuid.uuid4().hex[:16]
+        self._current_turn_id = uuid.uuid4().hex[:16]
         log.info("[%s] Processing batch: %s", self.name, task_preview)
         _broadcast("conversation_start", {
             "agent_name": self.name,
