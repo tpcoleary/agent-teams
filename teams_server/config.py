@@ -713,10 +713,28 @@ def write_agent_hermes_config(
     # Pinning there is actively harmful (caps a 1M-context model at 256K; forces
     # the full main model to do title-gen/compaction) AND freezes values Hermes
     # keeps fresh as it ships new models. So on the native route we DEFER.
+    #
+    # OAUTH providers (Nous Portal, OpenAI Codex, xAI OAuth …) are a special
+    # case: they DO have a known base_url in the Hermes provider registry, but
+    # their credentials are JWT/refresh-token pairs stored in auth.json — there
+    # is NO static API key.  Treating them like an OpenAI-compatible endpoint
+    # (because base_url is set) would pin api_key + every aux task to an empty
+    # or wrong key, breaking compaction / title-gen.  Instead we defer to Hermes
+    # exactly as we do for other native providers — Hermes knows the endpoint
+    # AND resolves the OAuth token at runtime.
     eff_base = base_url or ""
     eff_key = api_key or ""
     eff_provider = provider or "custom"
-    on_openai_compatible = bool(eff_base)
+    # Detect OAuth providers so we can defer auth to Hermes regardless of whether
+    # a base_url was supplied.  Import lazily to stay importable in environments
+    # where hermes_cli is not yet on the path.
+    _is_oauth = False
+    try:
+        from teams_server.model_config import _is_oauth_provider
+        _is_oauth = _is_oauth_provider(eff_provider)
+    except Exception:
+        pass
+    on_openai_compatible = bool(eff_base) and not _is_oauth
 
     model_section = existing.get("model")
     if not isinstance(model_section, dict):
@@ -730,12 +748,16 @@ def write_agent_hermes_config(
         model_section["context_length"] = AGENT_CONTEXT_WINDOW
         model_section["base_url"] = eff_base
     else:
-        # Native provider → let Hermes resolve the real per-model window. Strip
-        # any stale pins from a previous proxy-route write (merge-safe).
+        # Native / OAuth provider → let Hermes resolve the real per-model window.
+        # Strip any stale pins from a previous proxy-route write (merge-safe).
         model_section.pop("context_length", None)
         model_section.pop("base_url", None)
-    if eff_key:
+    if eff_key and not _is_oauth:
         model_section["api_key"] = eff_key
+    else:
+        # Strip any stale api_key written by a previous run that may have
+        # incorrectly stored a wrong key (e.g. OPENAI_API_KEY placeholder).
+        model_section.pop("api_key", None)
     existing["model"] = model_section
 
     _threshold = compression_threshold if compression_threshold is not None else COMPRESSION_THRESHOLD

@@ -724,7 +724,18 @@ class AgentDaemon:
                 _ensure_hermes_on_path()
                 from run_agent import AIAgent
 
-                os.environ["HERMES_HOME"] = str(self._hermes_home)
+                # NOTE: we deliberately do NOT set os.environ["HERMES_HOME"] here.
+                # The ContextVar override (_set_hermes_home_override), already active
+                # on this thread from _run_conversation_blocking, routes get_hermes_home()
+                # to self._hermes_home for all Hermes internal calls — config.yaml, state.db,
+                # SOUL.md, etc.  Setting the process-global env var to the isolated path
+                # would break hermes_constants.get_default_hermes_root(), which reads the
+                # env var directly (not the ContextVar) to locate the Hermes root for
+                # cross-profile lookups.  When the isolated path is not under ~/.hermes,
+                # get_default_hermes_root() returns the isolated path itself, making
+                # _global_auth_file_path() return None — cutting off the global auth.json
+                # fallback that resolve_nous_runtime_credentials() relies on for OAuth
+                # providers (Nous Portal, OpenAI Codex, xAI OAuth).
 
                 # Bring up this team's shared, persistent browser and point this
                 # agent at it via browser.cdp_url. All agents in the team share

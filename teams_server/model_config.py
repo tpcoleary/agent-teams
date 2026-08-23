@@ -86,6 +86,32 @@ def _provider_key_env(provider: str) -> str:
     return "OPENAI_API_KEY"
 
 
+def _is_oauth_provider(provider: str) -> bool:
+    """Return True when the provider uses OAuth (device-code / PKCE) rather than
+    a static API key stored in .env.
+
+    OAuth providers (e.g. ``nous``, ``openai-codex``, ``xai-oauth``) hold their
+    credentials in ``auth.json`` as JWT/refresh-token pairs that Hermes refreshes
+    at runtime.  They have NO static key in ``.env``, so the usual
+    ``_provider_key_env`` fallback to ``OPENAI_API_KEY`` would return whatever
+    happens to be in that env var for an *unrelated* provider — e.g. the
+    ``sk-1234`` placeholder left by a LiteLLM custom setup — and that wrong key
+    would then override Hermes' OAuth resolution, causing 403/401 errors.
+    """
+    if not provider or provider in _EXTRA_OPENAI_PRESETS:
+        return False
+    try:
+        ensure_hermes_importable()
+        from hermes_cli.auth import PROVIDER_REGISTRY
+
+        pc = PROVIDER_REGISTRY.get(provider)
+        if pc:
+            return getattr(pc, "auth_type", "api_key") not in ("api_key",)
+    except Exception:
+        pass
+    return False
+
+
 def _parse_env_file(env_path: Path) -> Dict[str, str]:
     """All KEY=VALUE pairs in a ``.env`` (quotes stripped). Empty on any error."""
     out: Dict[str, str] = {}
@@ -219,7 +245,15 @@ def read_model_from_home(home: Path) -> Dict[str, Any]:
             base_url = str(mc.get("base_url") or "").strip()
     except Exception as e:
         log.debug("read_model_from_home(%s) failed: %s", home, e)
-    api_key = _read_env_value(home / ".env", _provider_key_env(provider)) if provider else ""
+    # OAuth providers (Nous Portal, OpenAI Codex, xAI OAuth …) keep their
+    # credentials in auth.json as JWT/refresh-token pairs — there is no static
+    # API key in .env.  Falling back to OPENAI_API_KEY would return whatever
+    # unrelated key happens to be in that var (e.g. a LiteLLM placeholder),
+    # which would then override Hermes' OAuth resolution at runtime.
+    if provider and _is_oauth_provider(provider):
+        api_key = ""
+    else:
+        api_key = _read_env_value(home / ".env", _provider_key_env(provider)) if provider else ""
     return {"provider": provider, "model": model, "base_url": base_url, "api_key": api_key}
 
 
@@ -311,8 +345,16 @@ def resolve_model(agent_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # default — otherwise we'd send e.g. the OpenRouter key to Anthropic and 401
     # every turn. An override that switches provider without its own key gets an
     # empty key (and a warning), not the wrong provider's secret.
+    #
+    # OAuth providers (Nous Portal, Codex, xAI OAuth …) resolve credentials at
+    # runtime from auth.json — they carry NO static API key.  Never inherit a
+    # key for them; doing so passes a wrong/stale key that overrides Hermes' JWT
+    # resolution and causes 403 / 401 errors.
     if ov_key:
         api_key = ov_key
+    elif _is_oauth_provider(provider):
+        # Let Hermes resolve auth at runtime from auth.json — no static key.
+        api_key = ""
     else:
         base_provider = base.get("provider") or ""
         base_base_url = base.get("base_url") or ""

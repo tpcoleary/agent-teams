@@ -898,7 +898,11 @@ class MasterAgent:
             from run_agent import AIAgent
             from hermes_state import SessionDB
 
-            os.environ["HERMES_HOME"] = str(self._hermes_home)
+            # NOTE: we deliberately do NOT set os.environ["HERMES_HOME"] here.
+            # The ContextVar override (set in _run_turn before _ensure_agent)
+            # routes get_hermes_home() to self._hermes_home without corrupting
+            # hermes_constants.get_default_hermes_root() for OAuth providers.
+            # See the matching note in AgentDaemon._initialize_agent for details.
 
             override = (get_global_settings().get("master_model") or "").strip()
             eff = resolve_model({"model": override} if override else {})
