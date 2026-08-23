@@ -747,14 +747,10 @@ def _master_delete_team_handler(args: dict, **kwargs) -> str:
     if team_id not in (cfg.get("teams") or {}):
         return _err(f"Team '{team_id}' not found.")
     members = [n for n, a in cfg["agents"].items() if a.get("team_id") == team_id]
-    # Despawn every member's daemon first (drains + deletes the agent), then drop
-    # the now-empty team. The despawn hook handles each agent; the team-drop hook
-    # removes the team record + remaining files.
-    for n in members:
-        _hook("despawn", n)
+    # The despawn hook drains + deletes all member daemons, cleans up tasks/monitoring/inbox,
+    # drops the team record, wipes workspace directories, and shuts down the team browser.
     _hook("despawn", f"__team__:{team_id}")
     log.info("[master] deleted team '%s' (%d agents)", team_id, len(members))
-    _broadcast("team_deleted", {"team_id": team_id, "timestamp": time.time()})
     return _ok(team_id=team_id, deleted=True, agents_removed=len(members))
 
 

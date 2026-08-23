@@ -1231,10 +1231,31 @@ def delete_team(cfg: Dict[str, Any], team_id: str) -> bool:
     for name in agents_to_remove:
         del cfg["agents"][name]
     del cfg["teams"][team_id]
+
+    # Scrub deleted agents from allowed_peers of all remaining agents
+    to_remove_set = set(agents_to_remove)
+    for a in cfg["agents"].values():
+        peers = a.get("allowed_peers")
+        if isinstance(peers, list):
+            a["allowed_peers"] = [p for p in peers if p not in to_remove_set]
+
     # Nuke disk workspace
     team_dir = WORKSPACE_ROOT / team_id
     if team_dir.exists():
-        shutil.rmtree(team_dir)
+        try:
+            shutil.rmtree(team_dir)
+        except Exception as e:
+            log.warning("could not delete team dir %s: %s", team_dir, e)
+
+    # Nuke legacy workspaces if present
+    for name in agents_to_remove:
+        legacy_ws = DATA_ROOT / "workspaces" / name
+        if legacy_ws.exists():
+            try:
+                shutil.rmtree(legacy_ws)
+            except Exception:
+                pass
+
     _save_full_config(cfg)
     return True
 
@@ -1300,7 +1321,17 @@ def delete_agent(cfg: Dict[str, Any], name: str) -> bool:
     # Remove workspace data permanently
     ws = _derive_workspace_path(team_id, name)
     if ws.exists():
-        shutil.rmtree(ws)
+        try:
+            shutil.rmtree(ws)
+        except Exception as e:
+            log.warning("could not delete agent ws %s: %s", ws, e)
+
+    legacy_ws = DATA_ROOT / "workspaces" / name
+    if legacy_ws.exists():
+        try:
+            shutil.rmtree(legacy_ws)
+        except Exception:
+            pass
 
     # Also prune this agent from every other agent's allowed_peers list
     for a_cfg in cfg["agents"].values():

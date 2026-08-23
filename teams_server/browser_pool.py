@@ -418,9 +418,18 @@ class TeamBrowserManager:
         except Exception:
             pass
 
+    def stop_team_browser(self, team_id: str) -> None:
+        """Gracefully stop (or terminate) and unregister the browser for a single team."""
+        with self._lock:
+            info = self._browsers.pop(team_id, None)
+            self._ports.pop(team_id, None)
+            if info:
+                log.info("[%s] Stopping team browser (port %d)", team_id, info.get("port", 0))
+                self._quit_browser(info, team_id)
+
     def shutdown_all(self) -> None:
         """Stop all team browsers (profiles persist on disk for next run).
-
+        
         Close GRACEFULLY (``_quit_browser``) so cookies/sessions flush to each
         profile before exit — a plain SIGTERM races Chrome's network service and
         can lose just-written login cookies, so a restart after a login takeover

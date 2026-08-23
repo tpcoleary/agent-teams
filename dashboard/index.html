@@ -1556,8 +1556,44 @@ function handleWS(msg) {
             logEvent('system', `▶ ${payload.team_id} resumed (${payload.reason || 'budget'})`);
             if (payload.team_id === currentTeam) { teamBudget = payload; renderBudgetBanner(); loadTeamCosts(); }
             break;
-        case 'error': logEvent('error', `${payload.agent_name}: ${payload.error?.slice(0, 100)}`); break;
         case 'soul_updated': logEvent('system', `${payload.agent_name} soul updated`); break;
+        case 'team_deleted': {
+            logEvent('system', `Team deleted: ${payload.team_id}`);
+            // Purge tasks for this team from local tasksStore
+            for (const [id, t] of Array.from(tasksStore.entries())) {
+                if (t.team_id === payload.team_id) tasksStore.delete(id);
+            }
+            if (currentTeam === payload.team_id) {
+                currentTeam = null;
+                selectedAgent = null;
+                agentData = {};
+                teamBudget = {};
+                renderBudgetBanner();
+                loadTeams();
+                refreshData();
+                loadTeamCosts();
+                loadWorkspace(true);
+                if (tasksPageOpen) loadAllTasks();
+            } else {
+                loadTeams();
+                if (tasksPageOpen) renderTasksPage();
+            }
+            // Refresh inbox to drop questions/proposals from the deleted team
+            loadInbox();
+            break;
+        }
+        case 'agent_deleted': {
+            logEvent('system', `Agent deleted: ${payload.agent_name}`);
+            delete agentData[payload.agent_name];
+            for (const [id, t] of Array.from(tasksStore.entries())) {
+                if (t.assigned_to === payload.agent_name) tasksStore.delete(id);
+            }
+            if (selectedAgent === payload.agent_name) selectedAgent = null;
+            renderAgents();
+            if (tasksPageOpen) renderTasksPage();
+            loadInbox();
+            break;
+        }
         // Makes a silence window self-explaining: a gap that starts here was a
         // restart, not a stalled scheduler.
         case 'server_started': {
@@ -2027,7 +2063,8 @@ async function loadAllTasks() {
     const board = document.getElementById('tasks-board');
     board.innerHTML = '<div class="tasks-empty-col">Loading…</div>';
     try {
-        const res = await fetch(`${API_URL}/tasks?limit=1000`);
+        const teamParam = currentTeam ? `?team_id=${encodeURIComponent(currentTeam)}&limit=1000` : '?limit=1000';
+        const res = await fetch(`${API_URL}/tasks${teamParam}`);
         const d = await res.json();
         tasksStore = new Map((d.tasks || []).map(t => [t.id, t]));
         renderTasksPage();
@@ -2067,12 +2104,18 @@ function taskCardHTML(t) {
 function renderTasksPage() {
     const board = document.getElementById('tasks-board');
     const countEl = document.getElementById('tasks-page-count');
-    const all = Array.from(tasksStore.values());
+    const all = Array.from(tasksStore.values()).filter(t => {
+        if (!currentTeam) return true;
+        if (t.team_id) return t.team_id === currentTeam;
+        return Boolean(agentData[t.assigned_to]);
+    });
     countEl.textContent = all.length ? `${all.length} task(s)` : '';
     if (!all.length) { board.innerHTML = '<div class="tasks-empty-col">No tasks yet.</div>'; return; }
 
-    const agentNames = new Set([...Object.keys(agentData), ...all.map(t => t.assigned_to).filter(Boolean)]);
-    const columns = Array.from(agentNames).sort().map(name => {
+    const teamAgents = Object.keys(agentData).sort();
+    const displayAgents = teamAgents.length ? teamAgents : Array.from(new Set(all.map(t => t.assigned_to).filter(Boolean))).sort();
+
+    const columns = displayAgents.map(name => {
         const mine = all.filter(t => t.assigned_to === name);
         if (!mine.length && !agentData[name]) return '';
         let body = '';
@@ -3174,6 +3217,7 @@ function changeTeam(teamId) {
     refreshData();
     loadTeamCosts();
     loadWorkspace(true);
+    if (tasksPageOpen) loadAllTasks();
 }
 
 /* ===== TEAM WORKSPACE (shared project files) =====

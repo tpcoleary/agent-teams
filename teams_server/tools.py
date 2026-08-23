@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from teams_server.monitoring import monitor_db
 from teams_server.task_tools import TASK_TOOL_SCHEMAS
@@ -206,6 +206,43 @@ def resolve_config_proposal(pid: str, status: str):
         p["status"] = status
         p["resolved_at"] = time.time()
         return dict(p)
+
+
+def clear_pending_for_team(team_id: str, member_names: Optional[List[str]] = None) -> None:
+    """Purge all in-memory human questions and config proposals for a deleted team or its members."""
+    names = set(member_names or [])
+    with _pending_lock:
+        to_del_q = [
+            qid for qid, q in _pending_human_questions.items()
+            if q.get("team_id") == team_id or q.get("agent_name") in names
+        ]
+        for qid in to_del_q:
+            _pending_human_questions.pop(qid, None)
+    with _proposals_lock:
+        to_del_p = [
+            pid for pid, p in _pending_config_proposals.items()
+            if p.get("team_id") == team_id or p.get("agent_name") in names
+        ]
+        for pid in to_del_p:
+            _pending_config_proposals.pop(pid, None)
+
+
+def clear_pending_for_agent(agent_name: str) -> None:
+    """Purge all in-memory human questions and config proposals for a single deleted agent."""
+    with _pending_lock:
+        to_del_q = [
+            qid for qid, q in _pending_human_questions.items()
+            if q.get("agent_name") == agent_name
+        ]
+        for qid in to_del_q:
+            _pending_human_questions.pop(qid, None)
+    with _proposals_lock:
+        to_del_p = [
+            pid for pid, p in _pending_config_proposals.items()
+            if p.get("agent_name") == agent_name
+        ]
+        for pid in to_del_p:
+            _pending_config_proposals.pop(pid, None)
 
 # ---------------------------------------------------------------------------
 # Tool Schemas

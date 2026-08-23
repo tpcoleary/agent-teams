@@ -296,6 +296,31 @@ class TasksDB:
             conn.commit()
             return existing
 
+    def delete_tasks_for_team(self, team_id: str, member_names: Optional[list] = None) -> int:
+        """Purge all tasks belonging to a team or its member agents."""
+        with self._lock, self._conn() as conn:
+            names = list(member_names or [])
+            if names:
+                placeholders = ",".join("?" for _ in names)
+                sql = f"DELETE FROM tasks WHERE team_id=? OR assigned_to IN ({placeholders}) OR created_by IN ({placeholders})"
+                params = [team_id] + names + names
+            else:
+                sql = "DELETE FROM tasks WHERE team_id=?"
+                params = [team_id]
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount or 0
+
+    def delete_tasks_for_agent(self, agent_name: str) -> int:
+        """Purge all tasks created by or assigned to an agent."""
+        with self._lock, self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM tasks WHERE assigned_to=? OR created_by=?",
+                (agent_name, agent_name),
+            )
+            conn.commit()
+            return cur.rowcount or 0
+
 
 # Global singleton instance
 from teams_server.config import TASKS_DB  # noqa: E402

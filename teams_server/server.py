@@ -794,11 +794,40 @@ async def post_team(request: Request):
 @app.delete("/teams/{team_id}")
 async def del_team(team_id: str):
     cfg = load_agents_config()
-    # Stop all daemons in this team before deleting
-    agents_in_team = [n for n, a in cfg["agents"].items() if a.get("team_id") == team_id]
+    if team_id not in cfg.get("teams", {}):
+        return JSONResponse({"error": "team not found"}, status_code=404)
+
+    agents_in_team = [n for n, a in cfg.get("agents", {}).items() if a.get("team_id") == team_id]
+
+    # 1. Stop team browser (kills persistent Chrome process)
+    try:
+        from teams_server.browser_pool import team_browser_manager
+        team_browser_manager.stop_team_browser(team_id)
+    except Exception as e:
+        log.warning("stopping team browser for '%s' failed: %s", team_id, e)
+
+    # 2. Stop and drain all daemons in this team
     for name in agents_in_team:
+        d = daemons.get(name)
+        if d is not None:
+            await _interrupt_and_drain(d)
         _stop_and_unregister_daemon(name)
+
+    # 3. Purge in-memory human inbox questions and config proposals
+    from teams_server.tools import clear_pending_for_team
+    clear_pending_for_team(team_id, agents_in_team)
+
+    # 4. Purge tasks from tasks.db
+    from teams_server.tasks_db import task_db
+    task_db.delete_tasks_for_team(team_id, agents_in_team)
+
+    # 5. Purge telemetry and logs from monitoring.db
+    from teams_server.monitoring import monitor_db
+    monitor_db.delete_team_records(team_id, agents_in_team)
+
+    # 6. Delete team from config and wipe workspace on disk
     if delete_team(cfg, team_id):
+        _broadcast("team_deleted", {"team_id": team_id, "timestamp": time.time()})
         return JSONResponse({"status": "deleted", "team_id": team_id})
     return JSONResponse({"error": "team not found"}, status_code=404)
 
@@ -1242,7 +1271,7 @@ async def _interrupt_and_drain(daemon, timeout: float = 30.0) -> None:
 @app.delete("/agent/{agent_name}")
 async def remove_agent(agent_name: str):
     cfg = load_agents_config()
-    if agent_name not in cfg["agents"]:
+    if agent_name not in cfg.get("agents", {}):
         return JSONResponse({"error": "agent not found"}, status_code=404)
 
     # Stop the in-flight turn and wait for its worker thread to finish BEFORE the
@@ -1251,8 +1280,20 @@ async def remove_agent(agent_name: str):
     if daemon is not None:
         await _interrupt_and_drain(daemon)
     _stop_and_unregister_daemon(agent_name)
-    delete_agent(cfg, agent_name)
-    return JSONResponse({"status": "deleted", "agent_name": agent_name})
+
+    from teams_server.tools import clear_pending_for_agent
+    clear_pending_for_agent(agent_name)
+
+    from teams_server.tasks_db import task_db
+    task_db.delete_tasks_for_agent(agent_name)
+
+    from teams_server.monitoring import monitor_db
+    monitor_db.delete_agent_records(agent_name)
+
+    if delete_agent(cfg, agent_name):
+        _broadcast("agent_deleted", {"agent_name": agent_name, "timestamp": time.time()})
+        return JSONResponse({"status": "deleted", "agent_name": agent_name})
+    return JSONResponse({"error": "agent not found"}, status_code=404)
 
 
 def _update_daemon_cfg(agent_name: str, new_cfg: Dict[str, Any]):
@@ -1685,22 +1726,59 @@ async def _master_despawn_coro(token: str) -> None:
     team and then the team itself. Runs on the event loop."""
     if token.startswith("__team__:"):
         team_id = token.split(":", 1)[1]
+        cfg = load_agents_config()
         members = [
-            n for n, a in load_agents_config()["agents"].items()
+            n for n, a in cfg.get("agents", {}).items()
             if a.get("team_id") == team_id
         ]
+        # 1. Stop team browser (kills persistent Chrome process)
+        try:
+            from teams_server.browser_pool import team_browser_manager
+            team_browser_manager.stop_team_browser(team_id)
+        except Exception as e:
+            log.warning("stopping team browser for '%s' failed: %s", team_id, e)
+
+        # 2. Stop and drain daemons
         for n in members:
             d = daemons.get(n)
             if d is not None:
                 await _interrupt_and_drain(d)
             _stop_and_unregister_daemon(n)
-        delete_team(load_agents_config(), team_id)
+
+        # 3. Purge in-memory human inbox questions and config proposals
+        from teams_server.tools import clear_pending_for_team
+        clear_pending_for_team(team_id, members)
+
+        # 4. Purge tasks from tasks.db
+        from teams_server.tasks_db import task_db
+        task_db.delete_tasks_for_team(team_id, members)
+
+        # 5. Purge telemetry from monitoring.db
+        from teams_server.monitoring import monitor_db
+        monitor_db.delete_team_records(team_id, members)
+
+        # 6. Delete team from config and wipe workspace on disk
+        delete_team(cfg, team_id)
+        _broadcast("team_deleted", {"team_id": team_id, "timestamp": time.time()})
         return
+
+    cfg = load_agents_config()
     d = daemons.get(token)
     if d is not None:
         await _interrupt_and_drain(d)
     _stop_and_unregister_daemon(token)
-    delete_agent(load_agents_config(), token)
+
+    from teams_server.tools import clear_pending_for_agent
+    clear_pending_for_agent(token)
+
+    from teams_server.tasks_db import task_db
+    task_db.delete_tasks_for_agent(token)
+
+    from teams_server.monitoring import monitor_db
+    monitor_db.delete_agent_records(token)
+
+    delete_agent(cfg, token)
+    _broadcast("agent_deleted", {"agent_name": token, "timestamp": time.time()})
 
 
 def _master_despawn(token: str, loop: asyncio.AbstractEventLoop) -> None:

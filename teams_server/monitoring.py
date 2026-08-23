@@ -503,6 +503,64 @@ class MonitoringDB:
             log.warning("[MonitorDB] Prune failed: %s", e)
         return deleted
 
+    def delete_team_records(self, team_id: str, member_names: Optional[list] = None) -> Dict[str, int]:
+        """Purge all monitoring.db entries for a team and its member agents."""
+        names = list(member_names or [])
+        deleted: Dict[str, int] = {}
+        tables_with_team_and_agent = ["events", "messages", "digests", "decisions", "actions"]
+        try:
+            with self._conn() as conn:
+                for table in tables_with_team_and_agent:
+                    if names:
+                        placeholders = ",".join("?" for _ in names)
+                        sql = f"DELETE FROM {table} WHERE team_id=? OR agent_name IN ({placeholders})"
+                        params = [team_id] + names
+                    else:
+                        sql = f"DELETE FROM {table} WHERE team_id=?"
+                        params = [team_id]
+                    cur = conn.execute(sql, params)
+                    deleted[table] = cur.rowcount or 0
+
+                # milestones has team_id (no agent_name column)
+                cur = conn.execute("DELETE FROM milestones WHERE team_id=?", (team_id,))
+                deleted["milestones"] = cur.rowcount or 0
+
+                # delegations table has from_agent and to_agent
+                if names:
+                    placeholders = ",".join("?" for _ in names)
+                    sql = f"DELETE FROM delegations WHERE team_id=? OR from_agent IN ({placeholders}) OR to_agent IN ({placeholders})"
+                    params = [team_id] + names + names
+                else:
+                    sql = f"DELETE FROM delegations WHERE team_id=?"
+                    params = [team_id]
+                cur = conn.execute(sql, params)
+                deleted["delegations"] = cur.rowcount or 0
+
+                conn.commit()
+            if any(deleted.values()):
+                log.info("[MonitorDB] Purged team '%s' records: %s", team_id, deleted)
+        except Exception as e:
+            log.warning("[MonitorDB] Purge team '%s' failed: %s", team_id, e)
+        return deleted
+
+    def delete_agent_records(self, agent_name: str) -> Dict[str, int]:
+        """Purge all monitoring.db entries for a single agent."""
+        deleted: Dict[str, int] = {}
+        tables_with_agent = ["events", "messages", "digests", "decisions", "actions"]
+        try:
+            with self._conn() as conn:
+                for table in tables_with_agent:
+                    cur = conn.execute(f"DELETE FROM {table} WHERE agent_name=?", (agent_name,))
+                    deleted[table] = cur.rowcount or 0
+                cur = conn.execute("DELETE FROM delegations WHERE from_agent=? OR to_agent=?", (agent_name, agent_name))
+                deleted["delegations"] = cur.rowcount or 0
+                conn.commit()
+            if any(deleted.values()):
+                log.info("[MonitorDB] Purged agent '%s' records: %s", agent_name, deleted)
+        except Exception as e:
+            log.warning("[MonitorDB] Purge agent '%s' failed: %s", agent_name, e)
+        return deleted
+
     # ---- Delegation correlation (typed messages: TASK/QUESTION -> RESULT) ----
     def open_delegation(self, msg_id: str, from_agent: str, to_agent: str,
                         kind: str, summary: str = "", team_id: str = None) -> None:
