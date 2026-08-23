@@ -2200,7 +2200,7 @@ function renderTraceList() {
     const list = document.getElementById('obs-trace-list');
     if (!obsTraces.length) {
         list.innerHTML = '<div class="obs-empty"><div class="obs-empty-icon"><span data-icon="activity" data-icon-size="32"></span></div><div>No traces yet — run an agent turn</div></div>';
-        applyIcons(list); return;
+        hydrateIcons(list); return;
     }
     list.innerHTML = obsTraces.map(t => {
         const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '';
@@ -2226,7 +2226,7 @@ function renderTraceList() {
             ${t.response_preview ? `<div class="obs-trace-preview">${esc(t.response_preview)}</div>` : ''}
         </div>`;
     }).join('');
-    applyIcons(list);
+    hydrateIcons(list);
 }
 
 function fmtNum(n) { return n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
@@ -2351,7 +2351,7 @@ function renderTraceDetail(t) {
         </div>` : ''}
         <div style="height:30px"></div>
     `;
-    applyIcons(content);
+    hydrateIcons(content);
 }
 
 function obsToggleSection(id) {
