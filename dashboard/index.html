@@ -1110,6 +1110,8 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     <div class="browser-toolbar">
         <input type="text" id="browser-url" class="control-input" placeholder="Enter a URL and press Enter…"
                onkeydown="if(event.key==='Enter'){event.preventDefault();browserNavigate();}">
+        <button class="btn btn-sm btn-secondary" onclick="browserNavigate()" title="Navigate to URL">Go</button>
+        <button class="btn btn-sm btn-secondary" onclick="browserReload()" title="Reload page">↻</button>
         <select id="browser-tabs" onchange="browserSwitchTab(this.value)" title="Open tabs"></select>
         <button class="btn btn-sm btn-secondary" onclick="browserRefreshTabs()" title="Refresh tab list">Tabs</button>
     </div>
@@ -4283,8 +4285,7 @@ let _frameDevW = 1280, _frameDevH = 800;
 const _browserCanvas = () => document.getElementById('browser-canvas');
 
 function openBrowserPanel(teamId, opts = {}) {
-    teamId = teamId || currentTeam;
-    if (!teamId) { logEvent('error', 'Select a team first.'); return; }
+    teamId = teamId || currentTeam || (teamsCache[0] && teamsCache[0].id) || 'default';
     browserTeam = teamId;
     browserTakeoverQid = opts.qid || null;
     browserTakeoverAgent = opts.agent || null;
@@ -4292,8 +4293,26 @@ function openBrowserPanel(teamId, opts = {}) {
     document.getElementById('browser-done-btn').style.display = browserTakeoverQid ? '' : 'none';
     document.getElementById('browser-overlay').classList.add('open');
     document.getElementById('browser-panel').classList.add('open');
+
+    // Draw initial loading indicator on canvas
+    const c = _browserCanvas();
+    if (c) {
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#14181f';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.fillStyle = '#8e8e96';
+        ctx.font = '14px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Connecting to team browser…', c.width / 2, c.height / 2);
+    }
+
     _bindBrowserCanvas();
     connectBrowserWS(teamId);
+
+    // Schedule resize measurements as the panel slides in
+    setTimeout(_sendBrowserResize, 80);
+    setTimeout(_sendBrowserResize, 250);
+    setTimeout(_sendBrowserResize, 450);
 }
 
 function closeBrowserPanel() {
@@ -4316,10 +4335,20 @@ function connectBrowserWS(teamId) {
     let sock;
     try { sock = new WebSocket(url); } catch (e) { _setBrowserStatus(false, 'Connect failed'); return; }
     browserWS = sock;
-    sock.onopen = () => { if (apiKey) { try { sock.send(JSON.stringify({action:'auth', api_key: apiKey})); } catch(e){} } _setBrowserStatus(true, 'Live'); _sendBrowserResize(); browserRefreshTabs(); };
-    sock.onmessage = (e) => { try { _handleBrowserMsg(JSON.parse(e.data)); } catch (err) {} };
-    sock.onclose = (e) => { if (e && e.code === 4401) showLogin(); if (browserWS === sock) { browserWS = null; _setBrowserStatus(false, 'Disconnected'); } };
-    sock.onerror = () => { _setBrowserStatus(false, 'Error'); };
+    sock.onopen = () => {
+        if (apiKey) { try { sock.send(JSON.stringify({action:'auth', api_key: apiKey})); } catch(e){} }
+        _setBrowserStatus(true, 'Live');
+        _sendBrowserResize();
+        browserRefreshTabs();
+    };
+    sock.onmessage = (e) => {
+        try { _handleBrowserMsg(JSON.parse(e.data)); } catch (err) { console.error('[Browser] parse error:', err); }
+    };
+    sock.onclose = (e) => {
+        if (e && e.code === 4401) showLogin();
+        if (browserWS === sock) { browserWS = null; _setBrowserStatus(false, 'Disconnected'); }
+    };
+    sock.onerror = () => { _setBrowserStatus(false, 'Connection Error'); };
 }
 
 function _handleBrowserMsg(msg) {
@@ -4333,12 +4362,28 @@ function _handleBrowserMsg(msg) {
             if (c.width !== img.naturalWidth) c.width = img.naturalWidth;
             if (c.height !== img.naturalHeight) c.height = img.naturalHeight;
             c.getContext('2d').drawImage(img, 0, 0);
+            _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
         };
+        img.onerror = (e) => console.error('[Browser] image decode error:', e);
         img.src = 'data:image/jpeg;base64,' + p.data;
+    } else if (msg.type === 'navigated') {
+        const p = msg.payload || {};
+        if (p.url) document.getElementById('browser-url').value = p.url;
+        if (p.targetId) {
+            const sel = document.getElementById('browser-tabs');
+            if (sel) sel.value = p.targetId;
+        }
     } else if (msg.type === 'tabs') {
         const sel = document.getElementById('browser-tabs');
-        sel.innerHTML = (msg.payload.tabs || []).map(t =>
-            `<option value="${esc(t.targetId)}">${esc((t.title || t.url || 'tab').slice(0, 40))}</option>`).join('');
+        const p = msg.payload || {};
+        const tabs = p.tabs || [];
+        sel.innerHTML = tabs.map(t =>
+            `<option value="${escAttr(t.targetId)}">${esc((t.title || t.url || 'tab').slice(0, 45))}</option>`).join('');
+        if (p.current) sel.value = p.current;
+        const activeTab = tabs.find(t => t.targetId === (p.current || sel.value));
+        if (activeTab && activeTab.url && !document.getElementById('browser-url').value) {
+            document.getElementById('browser-url').value = activeTab.url;
+        }
     } else if (msg.type === 'error') {
         _setBrowserStatus(false, msg.payload?.message || 'Error');
         logEvent('error', 'Browser: ' + (msg.payload?.message || 'error'));
@@ -4354,7 +4399,7 @@ function _sendBrowserResize() {
     const stage = document.querySelector('.browser-stage');
     if (!stage) return;
     const w = Math.round(stage.clientWidth), h = Math.round(stage.clientHeight);
-    if (w > 0 && h > 0) _browserSend({type:'resize', width: w, height: h});
+    if (w > 100 && h > 100) _browserSend({type:'resize', width: w, height: h});
 }
 window.addEventListener('resize', () => {
     if (!document.getElementById('browser-panel').classList.contains('open')) return;
@@ -4366,9 +4411,10 @@ window.addEventListener('resize', () => {
 function _canvasToPage(e) {
     const c = _browserCanvas();
     const r = c.getBoundingClientRect();
+    if (!r.width || !r.height) return { x: 0, y: 0 };
     const x = ((e.clientX - r.left) / r.width) * _frameDevW;
     const y = ((e.clientY - r.top) / r.height) * _frameDevH;
-    return { x: Math.max(0, x), y: Math.max(0, y) };
+    return { x: Math.max(0, Math.min(_frameDevW, x)), y: Math.max(0, Math.min(_frameDevH, y)) };
 }
 function _mods(e) { return (e.altKey?1:0) | (e.ctrlKey?2:0) | (e.metaKey?4:0) | (e.shiftKey?8:0); }
 
@@ -4393,9 +4439,15 @@ function _bindBrowserCanvas() {
 }
 
 function browserNavigate() {
-    const url = document.getElementById('browser-url').value.trim();
-    if (url) _browserSend({type:'navigate', url});
+    let url = document.getElementById('browser-url').value.trim();
+    if (!url) return;
+    if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('about:') && !url.startsWith('file:')) {
+        url = 'https://' + url;
+        document.getElementById('browser-url').value = url;
+    }
+    _browserSend({type:'navigate', url});
 }
+function browserReload() { _browserSend({type:'refresh'}); }
 function browserRefreshTabs() { _browserSend({type:'tabs'}); }
 function browserSwitchTab(targetId) { if (targetId) _browserSend({type:'switch_tab', targetId}); }
 

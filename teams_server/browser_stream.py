@@ -190,6 +190,10 @@ async def relay(client_ws, team_id: str) -> None:
                                   open_timeout=10) as cdp:
                 await cdp.send(json.dumps({"id": next_id(), "method": "Page.enable"}))
                 await cdp.send(json.dumps({"id": next_id(), "method": "DOM.enable"}))
+                try:
+                    await cdp.send(json.dumps({"id": next_id(), "method": "Page.bringToFront"}))
+                except Exception:
+                    pass
                 # Make the page lay out at the panel's size so it isn't clipped.
                 # The client sends a 'resize' as soon as it has measured the
                 # canvas; until then use the last known size (or a sane default).
@@ -200,14 +204,34 @@ async def relay(client_ws, team_id: str) -> None:
                 await cdp.send(json.dumps({"id": next_id(),
                     "method": "Page.startScreencast", "params": _SCREENCAST_PARAMS}))
 
+                # Send initial target metadata and tabs list to the client
+                try:
+                    await client_ws.send_text(json.dumps({
+                        "type": "navigated",
+                        "payload": {
+                            "url": target.get("url", ""),
+                            "title": target.get("title", ""),
+                            "targetId": target.get("id", ""),
+                        },
+                    }))
+                    initial_tabs = await loop.run_in_executor(None, _cdp_targets, cdp_url)
+                    await client_ws.send_text(json.dumps({"type": "tabs", "payload": {
+                        "current": target.get("id"),
+                        "tabs": [{"targetId": t.get("id"), "title": t.get("title"),
+                                  "url": t.get("url")}
+                                 for t in initial_tabs if t.get("type") == "page"]}}))
+                except Exception as e:
+                    log.debug("[%s] initial browser metadata push failed: %s", team_id, e)
+
                 async def pump_cdp_to_client() -> None:
-                    """Forward screencast frames to the dashboard, ACK each one."""
+                    """Forward screencast frames and navigation events to the dashboard."""
                     async for raw in cdp:
                         try:
                             evt = json.loads(raw)
                         except Exception:
                             continue
-                        if evt.get("method") == "Page.screencastFrame":
+                        method = evt.get("method")
+                        if method == "Page.screencastFrame":
                             p = evt.get("params", {})
                             md = p.get("metadata", {})
                             await client_ws.send_text(json.dumps({
@@ -225,6 +249,23 @@ async def relay(client_ws, team_id: str) -> None:
                                 await cdp.send(json.dumps({"id": next_id(),
                                     "method": "Page.screencastFrameAck",
                                     "params": {"sessionId": sid}}))
+                        elif method == "Page.frameNavigated":
+                            frame = evt.get("params", {}).get("frame", {})
+                            # Only update URL bar on main frame navigation
+                            if not frame.get("parentId"):
+                                u = frame.get("url", "")
+                                if u:
+                                    await client_ws.send_text(json.dumps({
+                                        "type": "navigated",
+                                        "payload": {"url": u, "targetId": target.get("id", "")},
+                                    }))
+                        elif method == "Page.navigatedWithinDocument":
+                            u = evt.get("params", {}).get("url", "")
+                            if u:
+                                await client_ws.send_text(json.dumps({
+                                    "type": "navigated",
+                                    "payload": {"url": u, "targetId": target.get("id", "")},
+                                }))
 
                 async def pump_client_to_cdp() -> None:
                     """Translate dashboard input → CDP; handle tab list/switch locally.
@@ -243,6 +284,7 @@ async def relay(client_ws, team_id: str) -> None:
                         if mtype == "tabs":
                             tabs = await loop.run_in_executor(None, _cdp_targets, cdp_url)
                             await client_ws.send_text(json.dumps({"type": "tabs", "payload": {
+                                "current": target.get("id"),
                                 "tabs": [{"targetId": t.get("id"), "title": t.get("title"),
                                           "url": t.get("url")}
                                          for t in tabs if t.get("type") == "page"]}}))
@@ -250,8 +292,12 @@ async def relay(client_ws, team_id: str) -> None:
                         if mtype == "switch_tab":
                             url = await _resolve_target_ws(msg.get("targetId", ""))
                             if url:
+                                target["id"] = msg.get("targetId", "")
                                 switch_to["url"] = url
                                 return  # break out to reconnect on the new target
+                            continue
+                        if mtype == "refresh":
+                            await cdp.send(json.dumps({"id": next_id(), "method": "Page.reload"}))
                             continue
                         if mtype == "resize":
                             w = int(msg.get("width") or 0)
