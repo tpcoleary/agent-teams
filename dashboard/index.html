@@ -4351,21 +4351,70 @@ function connectBrowserWS(teamId) {
     sock.onerror = () => { _setBrowserStatus(false, 'Connection Error'); };
 }
 
+let _pendingFrameBitmap = null;
+let _frameRafScheduled = false;
+
+function _renderFrame() {
+    _frameRafScheduled = false;
+    if (!_pendingFrameBitmap) return;
+    const bmp = _pendingFrameBitmap;
+    _pendingFrameBitmap = null;
+    const c = _browserCanvas();
+    if (!c) {
+        if (bmp.close) bmp.close();
+        return;
+    }
+    if (c.width !== bmp.width) c.width = bmp.width;
+    if (c.height !== bmp.height) c.height = bmp.height;
+    const ctx = c.getContext('2d', { alpha: false });
+    ctx.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
+}
+
+function _scheduleFrameDraw(bmp) {
+    if (_pendingFrameBitmap && _pendingFrameBitmap.close) {
+        _pendingFrameBitmap.close();
+    }
+    _pendingFrameBitmap = bmp;
+    if (!_frameRafScheduled) {
+        _frameRafScheduled = true;
+        requestAnimationFrame(_renderFrame);
+    }
+}
+
+function _fallbackDraw(b64) {
+    const img = new Image();
+    img.onload = () => {
+        const c = _browserCanvas();
+        if (c.width !== img.naturalWidth) c.width = img.naturalWidth;
+        if (c.height !== img.naturalHeight) c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
+    };
+    img.src = 'data:image/jpeg;base64,' + b64;
+}
+
 function _handleBrowserMsg(msg) {
     if (msg.type === 'frame') {
         const p = msg.payload || {};
         if (p.deviceWidth) _frameDevW = p.deviceWidth;
         if (p.deviceHeight) _frameDevH = p.deviceHeight;
-        const img = new Image();
-        img.onload = () => {
-            const c = _browserCanvas();
-            if (c.width !== img.naturalWidth) c.width = img.naturalWidth;
-            if (c.height !== img.naturalHeight) c.height = img.naturalHeight;
-            c.getContext('2d').drawImage(img, 0, 0);
-            _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
-        };
-        img.onerror = (e) => console.error('[Browser] image decode error:', e);
-        img.src = 'data:image/jpeg;base64,' + p.data;
+        if (!p.data) return;
+
+        // Fast path: off-thread decode with createImageBitmap
+        if (window.createImageBitmap && window.atob) {
+            try {
+                const bin = atob(p.data);
+                const len = bin.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+                const blob = new Blob([bytes], {type: 'image/jpeg'});
+                createImageBitmap(blob).then(_scheduleFrameDraw).catch(() => _fallbackDraw(p.data));
+                return;
+            } catch (err) {}
+        }
+        _fallbackDraw(p.data);
     } else if (msg.type === 'navigated') {
         const p = msg.payload || {};
         if (p.url) document.getElementById('browser-url').value = p.url;
@@ -4419,6 +4468,32 @@ function _canvasToPage(e) {
 function _mods(e) { return (e.altKey?1:0) | (e.ctrlKey?2:0) | (e.metaKey?4:0) | (e.shiftKey?8:0); }
 
 let _browserBound = false;
+let _lastMouseMoveTime = 0;
+let _mouseMoveTimer = null;
+let _pendingMouseMove = null;
+let _wheelTimer = null;
+let _accumWheelX = 0, _accumWheelY = 0;
+let _wheelPos = null;
+
+function _sendThrottledMouseMove(p, mods) {
+    _pendingMouseMove = { ...p, modifiers: mods };
+    const now = performance.now();
+    if (now - _lastMouseMoveTime >= 25) {
+        _lastMouseMoveTime = now;
+        _browserSend({type:'mouse', action:'moved', ..._pendingMouseMove});
+        _pendingMouseMove = null;
+    } else if (!_mouseMoveTimer) {
+        _mouseMoveTimer = setTimeout(() => {
+            _mouseMoveTimer = null;
+            if (_pendingMouseMove) {
+                _lastMouseMoveTime = performance.now();
+                _browserSend({type:'mouse', action:'moved', ..._pendingMouseMove});
+                _pendingMouseMove = null;
+            }
+        }, 25);
+    }
+}
+
 function _bindBrowserCanvas() {
     if (_browserBound) return;
     _browserBound = true;
@@ -4426,9 +4501,24 @@ function _bindBrowserCanvas() {
     const btn = (b) => b === 0 ? 'left' : b === 1 ? 'middle' : b === 2 ? 'right' : 'left';
     c.addEventListener('mousedown', (e) => { e.preventDefault(); c.focus(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'pressed', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
     c.addEventListener('mouseup', (e) => { e.preventDefault(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'released', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
-    c.addEventListener('mousemove', (e) => { const p = _canvasToPage(e); _browserSend({type:'mouse', action:'moved', ...p, modifiers: _mods(e)}); });
+    c.addEventListener('mousemove', (e) => { const p = _canvasToPage(e); _sendThrottledMouseMove(p, _mods(e)); });
     c.addEventListener('contextmenu', (e) => e.preventDefault());
-    c.addEventListener('wheel', (e) => { e.preventDefault(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'wheel', ...p, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: _mods(e)}); }, { passive: false });
+    c.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        _wheelPos = _canvasToPage(e);
+        _accumWheelX += e.deltaX;
+        _accumWheelY += e.deltaY;
+        if (!_wheelTimer) {
+            _wheelTimer = setTimeout(() => {
+                _wheelTimer = null;
+                if (_wheelPos) {
+                    _browserSend({type:'mouse', action:'wheel', ..._wheelPos, deltaX: _accumWheelX, deltaY: _accumWheelY, modifiers: _mods(e)});
+                    _accumWheelX = 0;
+                    _accumWheelY = 0;
+                }
+            }, 20);
+        }
+    }, { passive: false });
     c.addEventListener('keydown', (e) => {
         e.preventDefault();
         const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
