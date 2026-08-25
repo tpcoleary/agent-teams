@@ -61,7 +61,7 @@ from teams_server.prompts import (
     compose_soul_identity,
     strip_stale_live_context,
 )
-from teams_server.browser_pool import team_browser_manager
+from teams_server.neko_pool import resolve_team_cdp_url
 from teams_server.monitoring import monitor_db
 from teams_server.inbox import InboxQueue
 from teams_server.tools import (
@@ -766,7 +766,7 @@ class AgentDaemon:
                 self._project_dir = project_dir
                 _set_terminal_cwd_override(project_dir)
 
-                cdp_url = team_browser_manager.ensure_team_browser(team_id)
+                cdp_url = resolve_team_cdp_url(team_id)
 
                 # Per-agent model + sampling knobs (configurable from the UI;
                 # fall back to the resolved default when unset).
@@ -2282,10 +2282,11 @@ class AgentDaemon:
         trace_id = 0
         try:
             self._ensure_agent()
-            # Heal a crashed team browser before the turn. Relaunch reuses the
+            # Heal the team browser before the turn (neko container or local
+            # headless Chrome, whichever mode is active). Relaunch reuses the
             # same port, so the cdp_url already in config.yaml stays valid — no
             # rewrite needed on the happy path (this is just a health probe).
-            team_browser_manager.ensure_team_browser(self.cfg.get("team_id", "default"))
+            resolve_team_cdp_url(self.cfg.get("team_id", "default"))
             # Build the dynamic per-turn live context (project tree + last 10 peer
             # messages + minute-precise time). CRITICAL: this changes every turn,
             # so it must NOT go into the system message. The system message sits at

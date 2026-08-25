@@ -485,11 +485,30 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 /* ===== EMBEDDED BROWSER PANEL (human takeover) ===== */
 .browser-panel { position: fixed; top: 0; right: -1000px; width: 960px; max-width: 98vw; bottom: 0; background: var(--bg-raised); border-left: 1px solid var(--border-strong); z-index: 160; transition: right 0.32s cubic-bezier(.2,.8,.2,1); display: flex; flex-direction: column; box-shadow: -30px 0 80px -40px rgba(0,0,0,0.9); }
 .browser-panel.open { right: 0; }
-.browser-toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.browser-chrome { border-bottom: 1px solid var(--border); flex: none; }
+.browser-tabstrip-row { display: flex; align-items: flex-end; gap: 6px; padding: 8px 12px 0; }
+.browser-tabstrip { flex: 1; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; min-height: 32px; }
+.browser-tabstrip::-webkit-scrollbar { display: none; }
+.btab { display: flex; align-items: center; gap: 7px; padding: 7px 6px 7px 10px; min-width: 110px; max-width: 200px; flex: 0 1 auto; background: var(--bg-input); border: 1px solid var(--border); border-bottom: none; border-radius: 9px 9px 0 0; font-size: 11.5px; color: var(--text-muted); cursor: pointer; position: relative; user-select: none; white-space: nowrap; }
+.btab.active { background: var(--bg-raised); color: var(--text); border-color: var(--border-strong); }
+.btab.active::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--bg-raised); }
+.btab-fav { width: 16px; height: 16px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; flex: none; letter-spacing: 0.02em; text-transform: uppercase; }
+.btab.loading .btab-fav { animation: pulse-dot 1s infinite; }
+.btab-title { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.btab-x { border: none; background: transparent; color: inherit; opacity: 0.55; width: 17px; height: 17px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 13px; line-height: 1; cursor: pointer; padding: 0; flex: none; }
+.btab-x:hover { opacity: 1; background: rgba(255,255,255,0.12); }
+.btab-new { width: 28px; height: 28px; margin-bottom: 4px; padding: 0; line-height: 1; font-size: 15px; flex: none; }
+.browser-toolbar { display: flex; gap: 6px; align-items: center; padding: 8px 12px; }
 .browser-toolbar .control-input { flex: 1; min-width: 0; height: 32px; }
-.browser-toolbar select { max-width: 200px; height: 32px; background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 11px; }
-.browser-stage { flex: 1; overflow: auto; background: #14181f; display: flex; align-items: flex-start; justify-content: center; }
-#browser-canvas { display: block; max-width: 100%; cursor: crosshair; background: #fff; }
+.browser-nav-btn { width: 32px; height: 32px; padding: 0; font-size: 14px; flex: none; }
+.browser-stage { flex: 1; overflow: hidden; background: #0e1218; display: flex; align-items: center; justify-content: center; position: relative; }
+#browser-canvas { display: block; max-width: 100%; max-height: 100%; object-fit: contain; cursor: default; background: #fff; outline: none; }
+.browser-loadbar { position: absolute; top: 0; left: -35%; height: 2px; width: 35%; background: var(--accent, #5b9dff); opacity: 0; transition: opacity 0.15s; z-index: 5; pointer-events: none; }
+.browser-loadbar.on { opacity: 1; animation: loadslide 1.1s ease-in-out infinite; }
+@keyframes loadslide { from { left: -35%; } to { left: 100%; } }
+.browser-stall { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(20,24,31,0.88); border: 1px solid var(--border-strong); color: var(--text-muted); font-size: 11px; padding: 6px 12px; border-radius: 999px; display: none; z-index: 6; font-family: var(--font-mono); pointer-events: none; }
+.browser-stall.on { display: block; }
+#browser-neko { display: none; position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #0d1117; z-index: 4; }
 .browser-status { padding: 6px 12px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); font-family: var(--font-mono); display: flex; justify-content: space-between; align-items: center; }
 .browser-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--text-muted); }
 .browser-status.live .dot { background: var(--accent, #3ecf8e); }
@@ -938,7 +957,6 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-add-agent">
         <div class="modal-header" id="mh-add-agent">Add Agent</div>
         <div class="modal-body">
-            <div class="control-group"><label class="control-label" for="add-agent-id">Agent ID (slug)</label><input class="control-input" id="add-agent-id" placeholder="e.g., researcher_2"></div>
             <div class="control-group"><label class="control-label" for="add-agent-name">Display Name</label><input class="control-input" id="add-agent-name" placeholder="e.g., Researcher Agent 2"></div>
             <div class="control-group"><label class="control-label" for="add-agent-peers">Allowed Peers / Watched agents (comma-separated)</label><input class="control-input" id="add-agent-peers" placeholder="editor, reviewer"></div>
             <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;margin:2px 0 8px"><input type="checkbox" id="add-agent-supervisor" onchange="onSupervisorToggle()"> <span data-icon="eye" data-icon-size="13"></span> Supervisor agent</label>
@@ -957,7 +975,6 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mh-add-team">
         <div class="modal-header" id="mh-add-team">Create Team</div>
         <div class="modal-body">
-            <div class="control-group"><label class="control-label" for="add-team-id">Team ID (slug)</label><input class="control-input" id="add-team-id" placeholder="e.g., alpha"></div>
             <div class="control-group"><label class="control-label" for="add-team-name">Team Name</label><input class="control-input" id="add-team-name" placeholder="e.g., Alpha Team"></div>
         </div>
         <div class="modal-footer">
@@ -1104,19 +1121,33 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
         <h3><span data-icon="globe" data-icon-size="14"></span> Browser <span id="browser-team-tag" class="master-model-tag"></span></h3>
         <div style="display:flex;gap:8px;align-items:center">
             <button class="btn btn-sm" id="browser-done-btn" style="display:none" onclick="finishTakeover()" title="Hand control back to the agent">Done — hand back</button>
+            <button class="btn btn-sm btn-secondary" id="browser-stop-btn" style="display:none" onclick="browserStopViewer()" title="Stop the containerized browser (frees RAM; profile persists)">Stop</button>
             <button class="btn btn-sm btn-secondary" onclick="closeBrowserPanel()">Close</button>
         </div>
     </div>
-    <div class="browser-toolbar">
-        <input type="text" id="browser-url" class="control-input" placeholder="Enter a URL and press Enter…"
-               onkeydown="if(event.key==='Enter'){event.preventDefault();browserNavigate();}">
-        <button class="btn btn-sm btn-secondary" onclick="browserNavigate()" title="Navigate to URL">Go</button>
-        <button class="btn btn-sm btn-secondary" onclick="browserReload()" title="Reload page">↻</button>
-        <select id="browser-tabs" onchange="browserSwitchTab(this.value)" title="Open tabs"></select>
-        <button class="btn btn-sm btn-secondary" onclick="browserRefreshTabs()" title="Refresh tab list">Tabs</button>
+    <div class="inbox-header" id="browser-neko-bar" style="display:none;padding:6px 12px;border-bottom:1px solid var(--border)">
+        <h3 style="font-size:12.5px"><span data-icon="globe" data-icon-size="13"></span> WebRTC stream — real Chromium in a container</h3>
+        <span style="font-size:11px;color:var(--text-muted)">60fps · audio · native tabs &amp; omnibox</span>
+    </div>
+    <div class="browser-chrome">
+        <div class="browser-tabstrip-row">
+            <div class="browser-tabstrip" id="browser-tabstrip" title="Open tabs"></div>
+            <button class="btn btn-sm btn-secondary btab-new" onclick="browserNewTab()" title="New tab">+</button>
+        </div>
+        <div class="browser-toolbar">
+            <button class="btn btn-sm btn-secondary browser-nav-btn" onclick="browserBack()" title="Back">‹</button>
+            <button class="btn btn-sm btn-secondary browser-nav-btn" onclick="browserForward()" title="Forward">›</button>
+            <button class="btn btn-sm btn-secondary browser-nav-btn" onclick="browserReload()" title="Reload page">↻</button>
+            <input type="text" id="browser-url" class="control-input" placeholder="Enter a URL and press Enter…"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();browserNavigate();}">
+            <button class="btn btn-sm btn-secondary" onclick="browserNavigate()" title="Navigate to URL">Go</button>
+        </div>
     </div>
     <div class="browser-stage">
-        <canvas id="browser-canvas" width="1280" height="800" tabindex="0"></canvas>
+        <iframe id="browser-neko" title="Team browser (WebRTC)" allow="fullscreen; clipboard-read; clipboard-write; autoplay"></iframe>
+        <canvas id="browser-canvas" width="1920" height="1080" tabindex="0"></canvas>
+        <div class="browser-loadbar" id="browser-loadbar"></div>
+        <div class="browser-stall" id="browser-stall">Waiting for the page…</div>
     </div>
     <div class="browser-status" id="browser-status"><span><span class="dot"></span><span id="browser-status-text">Disconnected</span></span><span id="browser-hint">Click the page, then type. Scroll to pan.</span></div>
 </div>
@@ -3745,9 +3776,9 @@ function hideModal(id) {
 }
 
 async function doAddTeam() {
-    const id = document.getElementById('add-team-id').value.trim();
     const name = document.getElementById('add-team-name').value.trim();
-    if (!id || !name) return;
+    if (!name) return;
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `team-${Date.now()}`;
     try {
         const res = await fetch(`${API_URL}/teams`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({team_id: id, name}) });
         const data = await res.json();
@@ -3764,20 +3795,19 @@ function onSupervisorToggle() {
 }
 
 async function doAddAgent() {
-    const id = document.getElementById('add-agent-id').value.trim();
     const name = document.getElementById('add-agent-name').value.trim();
     const peersRaw = document.getElementById('add-agent-peers').value.trim();
     const role_soul = document.getElementById('add-agent-soul').value.trim();
     const isSupervisor = document.getElementById('add-agent-supervisor').checked;
     const peers = peersRaw ? peersRaw.split(',').map(p => p.trim()).filter(Boolean) : [];
-    if (!id || !name || !currentTeam) return;
+    if (!name || !currentTeam) return;
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `agent-${Date.now()}`;
     try {
         const res = await fetch(`${API_URL}/agent`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({agent_name: id, name, team_id: currentTeam, allowed_peers: peers, role_soul: role_soul || undefined, is_supervisor: isSupervisor}) });
         const data = await res.json();
         if (data.error) { logEvent('error', data.error); return; }
         logEvent('system', `${isSupervisor ? 'Supervisor' : 'Agent'} created: ${id}`);
         hideModal('modal-add-agent');
-        document.getElementById('add-agent-id').value = '';
         document.getElementById('add-agent-name').value = '';
         document.getElementById('add-agent-peers').value = '';
         document.getElementById('add-agent-soul').value = '';
@@ -4282,9 +4312,21 @@ let browserTeam = null;
 let browserTakeoverQid = null;
 let browserTakeoverAgent = null;
 let _frameDevW = 1280, _frameDevH = 800;
+// Chrome-style tab model: [{targetId,title,url}], plus the streamed target id.
+let browserTabs = [];
+let browserCurrentTarget = null;
+// Reconnect + liveness: static pages produce no frames, so "alive" is judged
+// by ANY message (the server pings every ~15s), not by frames.
+let _browserShouldBeOpen = false;
+let _browserReconnectAttempts = 0;
+let _browserReconnectTimer = null;
+let _browserAliveTimer = null;
+let _lastBrowserMsgTime = 0;
+// True while the panel shows the neko WebRTC iframe instead of the canvas.
+let _nekoActive = false;
 const _browserCanvas = () => document.getElementById('browser-canvas');
 
-function openBrowserPanel(teamId, opts = {}) {
+async function openBrowserPanel(teamId, opts = {}) {
     teamId = teamId || currentTeam || (teamsCache[0] && teamsCache[0].id) || 'default';
     browserTeam = teamId;
     browserTakeoverQid = opts.qid || null;
@@ -4293,6 +4335,8 @@ function openBrowserPanel(teamId, opts = {}) {
     document.getElementById('browser-done-btn').style.display = browserTakeoverQid ? '' : 'none';
     document.getElementById('browser-overlay').classList.add('open');
     document.getElementById('browser-panel').classList.add('open');
+    _browserShouldBeOpen = true;
+    _browserReconnectAttempts = 0;
 
     // Draw initial loading indicator on canvas
     const c = _browserCanvas();
@@ -4305,19 +4349,74 @@ function openBrowserPanel(teamId, opts = {}) {
         ctx.textAlign = 'center';
         ctx.fillText('Connecting to team browser…', c.width / 2, c.height / 2);
     }
+    _setNekoMode(false);
 
+    // Ask the server how this team's browser is best viewed: a WebRTC neko
+    // container (real Chrome UI, 60fps) or the built-in CDP screencast.
+    let viewer = null;
+    try {
+        const res = await fetch(`${API_URL}/teams/${encodeURIComponent(teamId)}/browser/viewer`);
+        if (res.ok) viewer = await res.json();
+    } catch (e) { /* network hiccup → screencast fallback */ }
+
+    if (_browserShouldBeOpen && viewer && viewer.mode === 'neko' && viewer.embed_url) {
+        _enterNekoMode(viewer);
+        return;   // WebRTC carries its own input — no WS needed
+    }
+    if (!_browserShouldBeOpen) return;   // panel closed while fetching
+    if (viewer && viewer.reason) {
+        logEvent('error', 'Browser viewer: ' + viewer.reason);
+        _setBrowserStatus(false, 'Screencast fallback');
+    }
+
+    browserTabs = [];
+    browserCurrentTarget = null;
+    _bindTabstrip();
+    _renderTabstrip();
     _bindBrowserCanvas();
     connectBrowserWS(teamId);
+}
 
-    // Schedule resize measurements as the panel slides in
-    setTimeout(_sendBrowserResize, 80);
-    setTimeout(_sendBrowserResize, 250);
-    setTimeout(_sendBrowserResize, 450);
+/* --- Viewing-mode switch (WebRTC iframe ↔ CDP screencast canvas) -------- */
+function _setNekoMode(on) {
+    document.getElementById('browser-neko').style.display = on ? 'block' : 'none';
+    document.getElementById('browser-canvas').style.display = on ? 'none' : '';
+    document.querySelector('.browser-tabstrip-row').style.display = on ? 'none' : 'flex';
+    document.getElementById('browser-stop-btn').style.display = on ? '' : 'none';
+    document.getElementById('browser-neko-bar').style.display = on ? '' : 'none';
+}
+function _enterNekoMode(viewer) {
+    _nekoActive = true;
+    _setNekoMode(true);
+    document.getElementById('browser-neko').src = viewer.embed_url;
+    _setBrowserStatus(true, 'Live · WebRTC 60fps');
+}
+function browserStopViewer() {
+    // Hand the panel over to the local screencast and keep the container off
+    // until the server restarts (the server-side disable makes that sticky).
+    const team = browserTeam;
+    _nekoActive = false;
+    document.getElementById('browser-neko').src = 'about:blank';
+    _setNekoMode(false);
+    browserTabs = [];
+    browserCurrentTarget = null;
+    _renderTabstrip();
+    fetch(`${API_URL}/teams/${encodeURIComponent(team)}/browser/viewer/stop`, { method: 'POST' })
+        .then(() => logEvent('system', 'Containerized browser stopped — using built-in stream'))
+        .catch((e) => logEvent('error', e.message));
+    connectBrowserWS(team);
 }
 
 function closeBrowserPanel() {
+    _browserShouldBeOpen = false;
+    clearTimeout(_browserReconnectTimer);
+    clearInterval(_browserAliveTimer);
     document.getElementById('browser-overlay').classList.remove('open');
     document.getElementById('browser-panel').classList.remove('open');
+    if (_nekoActive) {
+        _nekoActive = false;
+        document.getElementById('browser-neko').src = 'about:blank';   // detach the WebRTC stream
+    }
     if (browserWS) { try { browserWS.close(); } catch (e) {} browserWS = null; }
     _setBrowserStatus(false, 'Disconnected');
 }
@@ -4328,6 +4427,17 @@ function _setBrowserStatus(live, text) {
     document.getElementById('browser-status-text').textContent = text;
 }
 
+function _scheduleBrowserReconnect() {
+    if (!_browserShouldBeOpen) return;
+    _browserReconnectAttempts++;
+    const delay = Math.min(500 * Math.pow(2, _browserReconnectAttempts), 6000);
+    _setBrowserStatus(false, `Reconnecting in ${Math.round(delay / 1000)}s…`);
+    clearTimeout(_browserReconnectTimer);
+    _browserReconnectTimer = setTimeout(() => {
+        if (_browserShouldBeOpen && browserTeam) connectBrowserWS(browserTeam);
+    }, delay);
+}
+
 function connectBrowserWS(teamId) {
     if (browserWS) { try { browserWS.close(); } catch (e) {} }
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/teams/${encodeURIComponent(teamId)}/browser/ws`;
@@ -4336,19 +4446,35 @@ function connectBrowserWS(teamId) {
     try { sock = new WebSocket(url); } catch (e) { _setBrowserStatus(false, 'Connect failed'); return; }
     browserWS = sock;
     sock.onopen = () => {
+        if (browserWS !== sock) return;   // stale socket from a previous attempt
+        _browserReconnectAttempts = 0;
+        _lastBrowserMsgTime = Date.now();
         if (apiKey) { try { sock.send(JSON.stringify({action:'auth', api_key: apiKey})); } catch(e){} }
         _setBrowserStatus(true, 'Live');
         _sendBrowserResize();
-        browserRefreshTabs();
+        clearInterval(_browserAliveTimer);
+        _browserAliveTimer = setInterval(() => {
+            // No message for 35s (server pings every 15s) → the socket is dead.
+            if (!_browserShouldBeOpen || !browserWS) return;
+            if (Date.now() - _lastBrowserMsgTime > 35000) {
+                try { browserWS.close(); } catch (e) {}   // onclose reconnects
+            }
+        }, 5000);
     };
     sock.onmessage = (e) => {
+        if (browserWS !== sock) return;
+        _lastBrowserMsgTime = Date.now();
         try { _handleBrowserMsg(JSON.parse(e.data)); } catch (err) { console.error('[Browser] parse error:', err); }
     };
     sock.onclose = (e) => {
-        if (e && e.code === 4401) showLogin();
-        if (browserWS === sock) { browserWS = null; _setBrowserStatus(false, 'Disconnected'); }
+        if (browserWS !== sock) return;
+        browserWS = null;
+        clearInterval(_browserAliveTimer);
+        if (e && e.code === 4401) { showLogin(); return; }
+        if (_browserShouldBeOpen) _scheduleBrowserReconnect();
+        else _setBrowserStatus(false, 'Disconnected');
     };
-    sock.onerror = () => { _setBrowserStatus(false, 'Connection Error'); };
+    sock.onerror = () => { if (browserWS === sock) _setBrowserStatus(false, 'Connection Error'); };
 }
 
 let _pendingFrameBitmap = null;
@@ -4383,56 +4509,45 @@ function _scheduleFrameDraw(bmp) {
     }
 }
 
-function _fallbackDraw(b64) {
-    const img = new Image();
-    img.onload = () => {
-        const c = _browserCanvas();
-        if (c.width !== img.naturalWidth) c.width = img.naturalWidth;
-        if (c.height !== img.naturalHeight) c.height = img.naturalHeight;
-        c.getContext('2d').drawImage(img, 0, 0);
-        _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
-    };
-    img.src = 'data:image/jpeg;base64,' + b64;
-}
-
 function _handleBrowserMsg(msg) {
     if (msg.type === 'frame') {
+        _hideBrowserStall();
         const p = msg.payload || {};
         if (p.deviceWidth) _frameDevW = p.deviceWidth;
         if (p.deviceHeight) _frameDevH = p.deviceHeight;
         if (!p.data) return;
 
-        // Fast path: off-thread decode with createImageBitmap
-        if (window.createImageBitmap && window.atob) {
-            try {
-                const bin = atob(p.data);
-                const len = bin.length;
-                const bytes = new Uint8Array(len);
-                for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
-                const blob = new Blob([bytes], {type: 'image/jpeg'});
-                createImageBitmap(blob).then(_scheduleFrameDraw).catch(() => _fallbackDraw(p.data));
-                return;
-            } catch (err) {}
-        }
-        _fallbackDraw(p.data);
+        // Off-thread JPEG decode; createImageBitmap is universal since 2022.
+        const bin = atob(p.data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        createImageBitmap(new Blob([bytes], {type: 'image/jpeg'}))
+            .then(_scheduleFrameDraw).catch(() => {});
     } else if (msg.type === 'navigated') {
         const p = msg.payload || {};
         if (p.url) document.getElementById('browser-url').value = p.url;
         if (p.targetId) {
-            const sel = document.getElementById('browser-tabs');
-            if (sel) sel.value = p.targetId;
+            browserCurrentTarget = p.targetId;
+            // Patch the tab's URL/title locally; the next tabs push brings the title.
+            const tab = browserTabs.find(t => t.targetId === p.targetId);
+            if (tab) { if (p.url) tab.url = p.url; if (p.title) tab.title = p.title; }
+            _renderTabstrip();
         }
+        _hideBrowserStall();
     } else if (msg.type === 'tabs') {
-        const sel = document.getElementById('browser-tabs');
         const p = msg.payload || {};
-        const tabs = p.tabs || [];
-        sel.innerHTML = tabs.map(t =>
-            `<option value="${escAttr(t.targetId)}">${esc((t.title || t.url || 'tab').slice(0, 45))}</option>`).join('');
-        if (p.current) sel.value = p.current;
-        const activeTab = tabs.find(t => t.targetId === (p.current || sel.value));
-        if (activeTab && activeTab.url && !document.getElementById('browser-url').value) {
-            document.getElementById('browser-url').value = activeTab.url;
+        browserTabs = p.tabs || [];
+        if (p.current) browserCurrentTarget = p.current;
+        else if (!browserTabs.find(t => t.targetId === browserCurrentTarget)) {
+            browserCurrentTarget = browserTabs[0] ? browserTabs[0].targetId : null;
         }
+        _renderTabstrip();
+    } else if (msg.type === 'loading') {
+        _setBrowserLoading(!!(msg.payload && msg.payload.loading));
+    } else if (msg.type === 'stall') {
+        _showBrowserStall();
+    } else if (msg.type === 'ping') {
+        // Keepalive only — liveness already tracked in onmessage.
     } else if (msg.type === 'error') {
         _setBrowserStatus(false, msg.payload?.message || 'Error');
         logEvent('error', 'Browser: ' + (msg.payload?.message || 'error'));
@@ -4468,29 +4583,37 @@ function _canvasToPage(e) {
 function _mods(e) { return (e.altKey?1:0) | (e.ctrlKey?2:0) | (e.metaKey?4:0) | (e.shiftKey?8:0); }
 
 let _browserBound = false;
-let _lastMouseMoveTime = 0;
-let _mouseMoveTimer = null;
-let _pendingMouseMove = null;
+let _lastMoveSent = 0;
+let _moveTimer = null;
+
+// Mouse moves fire far faster than CDP needs; cap at ~33/s and always land
+// the final position with one trailing send.
+function _sendMouseMove(p, mods) {
+    const send = () => _browserSend({type:'mouse', action:'moved', x:p.x, y:p.y, modifiers:mods});
+    const now = performance.now();
+    if (now - _lastMoveSent >= 30) { _lastMoveSent = now; send(); return; }
+    clearTimeout(_moveTimer);
+    _moveTimer = setTimeout(() => { _lastMoveSent = performance.now(); send(); }, 30 - (now - _lastMoveSent));
+}
+
 let _wheelTimer = null;
 let _accumWheelX = 0, _accumWheelY = 0;
-let _wheelPos = null;
+let _lastWheelP = null, _lastWheelMods = 0;
 
-function _sendThrottledMouseMove(p, mods) {
-    _pendingMouseMove = { ...p, modifiers: mods };
-    const now = performance.now();
-    if (now - _lastMouseMoveTime >= 25) {
-        _lastMouseMoveTime = now;
-        _browserSend({type:'mouse', action:'moved', ..._pendingMouseMove});
-        _pendingMouseMove = null;
-    } else if (!_mouseMoveTimer) {
-        _mouseMoveTimer = setTimeout(() => {
-            _mouseMoveTimer = null;
-            if (_pendingMouseMove) {
-                _lastMouseMoveTime = performance.now();
-                _browserSend({type:'mouse', action:'moved', ..._pendingMouseMove});
-                _pendingMouseMove = null;
+function _sendWheel(p, deltaX, deltaY, mods) {
+    _accumWheelX += deltaX;
+    _accumWheelY += deltaY;
+    _lastWheelP = p;
+    _lastWheelMods = mods;
+    if (!_wheelTimer) {
+        _wheelTimer = setTimeout(() => {
+            _wheelTimer = null;
+            if (_lastWheelP) {
+                _browserSend({type:'mouse', action:'wheel', ..._lastWheelP, deltaX: _accumWheelX, deltaY: _accumWheelY, modifiers: _lastWheelMods});
+                _accumWheelX = 0;
+                _accumWheelY = 0;
             }
-        }, 25);
+        }, 16);
     }
 }
 
@@ -4501,23 +4624,11 @@ function _bindBrowserCanvas() {
     const btn = (b) => b === 0 ? 'left' : b === 1 ? 'middle' : b === 2 ? 'right' : 'left';
     c.addEventListener('mousedown', (e) => { e.preventDefault(); c.focus(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'pressed', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
     c.addEventListener('mouseup', (e) => { e.preventDefault(); const p = _canvasToPage(e); _browserSend({type:'mouse', action:'released', ...p, button: btn(e.button), clickCount: e.detail || 1, modifiers: _mods(e)}); });
-    c.addEventListener('mousemove', (e) => { const p = _canvasToPage(e); _sendThrottledMouseMove(p, _mods(e)); });
+    c.addEventListener('mousemove', (e) => { _sendMouseMove(_canvasToPage(e), _mods(e)); });
     c.addEventListener('contextmenu', (e) => e.preventDefault());
     c.addEventListener('wheel', (e) => {
         e.preventDefault();
-        _wheelPos = _canvasToPage(e);
-        _accumWheelX += e.deltaX;
-        _accumWheelY += e.deltaY;
-        if (!_wheelTimer) {
-            _wheelTimer = setTimeout(() => {
-                _wheelTimer = null;
-                if (_wheelPos) {
-                    _browserSend({type:'mouse', action:'wheel', ..._wheelPos, deltaX: _accumWheelX, deltaY: _accumWheelY, modifiers: _mods(e)});
-                    _accumWheelX = 0;
-                    _accumWheelY = 0;
-                }
-            }, 20);
-        }
+        _sendWheel(_canvasToPage(e), e.deltaX, e.deltaY, _mods(e));
     }, { passive: false });
     c.addEventListener('keydown', (e) => {
         e.preventDefault();
@@ -4535,11 +4646,96 @@ function browserNavigate() {
         url = 'https://' + url;
         document.getElementById('browser-url').value = url;
     }
+    _setBrowserLoading(true);
     _browserSend({type:'navigate', url});
 }
 function browserReload() { _browserSend({type:'refresh'}); }
-function browserRefreshTabs() { _browserSend({type:'tabs'}); }
-function browserSwitchTab(targetId) { if (targetId) _browserSend({type:'switch_tab', targetId}); }
+function browserSwitchTab(targetId) {
+    if (!targetId || targetId === browserCurrentTarget) return;
+    browserCurrentTarget = targetId;   // optimistic; server confirms via navigated
+    _renderTabstrip();
+    _browserSend({type:'switch_tab', targetId});
+}
+function browserNewTab() { _browserSend({type:'new_tab'}); }
+function browserCloseTab(targetId) {
+    if (!targetId) return;
+    // Optimistic removal for background tabs; closing the active tab is handled
+    // by the server (it hops to another page and pushes a fresh tab list).
+    if (targetId !== browserCurrentTarget) {
+        browserTabs = browserTabs.filter(t => t.targetId !== targetId);
+        _renderTabstrip();
+    }
+    _browserSend({type:'close_tab', targetId});
+}
+function browserBack() { _browserSend({type:'back'}); }
+function browserForward() { _browserSend({type:'forward'}); }
+
+/* --- Tab strip (Chrome-style) ------------------------------------------- */
+function _tabHostname(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return ''; }
+}
+function _tabHue(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+    return h % 360;
+}
+function _renderTabstrip() {
+    const strip = document.getElementById('browser-tabstrip');
+    if (!strip) return;
+    if (!browserTabs.length) {
+        strip.innerHTML = '<div class="btab" style="opacity:.5;pointer-events:none"><span class="btab-title">No tabs yet…</span></div>';
+        return;
+    }
+    strip.innerHTML = browserTabs.map(t => {
+        const host = _tabHostname(t.url || '');
+        const label = t.title || host || t.url || 'Tab';
+        const letter = (host || label).charAt(0);
+        const loadingCls = (t.targetId === browserCurrentTarget && document.getElementById('browser-loadbar').classList.contains('on')) ? ' loading' : '';
+        return `<div class="btab${t.targetId === browserCurrentTarget ? ' active' : ''}${loadingCls}" data-tid="${escAttr(t.targetId)}" title="${escAttr(label)}">
+            <span class="btab-fav" style="background:hsl(${_tabHue(host || 'x')},52%,44%)">${esc(letter)}</span>
+            <span class="btab-title">${esc(label)}</span>
+            <button class="btab-x" data-close="${escAttr(t.targetId)}" title="Close tab">×</button>
+        </div>`;
+    }).join('');
+}
+
+let _tabstripBound = false;
+function _bindTabstrip() {
+    if (_tabstripBound) return;
+    _tabstripBound = true;
+    const strip = document.getElementById('browser-tabstrip');
+    strip.addEventListener('click', (e) => {
+        const x = e.target.closest('.btab-x');
+        if (x) { e.stopPropagation(); browserCloseTab(x.dataset.close); return; }
+        const tab = e.target.closest('.btab');
+        if (tab && tab.dataset.tid) browserSwitchTab(tab.dataset.tid);
+    });
+    // Middle-click closes, like a real browser.
+    strip.addEventListener('auxclick', (e) => {
+        if (e.button !== 1) return;
+        const x = e.target.closest('.btab-x');
+        const tid = x ? x.dataset.close : (e.target.closest('.btab') || {}).dataset?.tid;
+        if (tid) browserCloseTab(tid);
+    });
+}
+
+/* --- Loading / stall overlays ------------------------------------------- */
+function _setBrowserLoading(on) {
+    document.getElementById('browser-loadbar').classList.toggle('on', !!on);
+    const active = document.querySelector('#browser-tabstrip .btab.active');
+    if (active) active.classList.toggle('loading', !!on);
+}
+function _showBrowserStall() {
+    document.getElementById('browser-stall').classList.add('on');
+    _setBrowserStatus(true, `Waiting · ${_frameDevW}×${_frameDevH}`);
+}
+function _hideBrowserStall() {
+    const el = document.getElementById('browser-stall');
+    if (el.classList.contains('on')) {
+        el.classList.remove('on');
+        _setBrowserStatus(true, `Live · ${_frameDevW}×${_frameDevH}`);
+    }
+}
 
 async function finishTakeover() {
     if (browserTakeoverQid && browserTakeoverAgent) {

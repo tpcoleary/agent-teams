@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the embedded-browser handover relay (teams_server/browser_stream).
 
-Covers the pure logic — CDP page-target selection and dashboard→CDP message
+Covers the pure logic — CDP page-target picking and dashboard→CDP message
 translation — plus the WS endpoint's team-validation guard. The live screencast
-relay needs a real Chrome, so it's exercised manually (see docs/deploy-vps.md);
-here we lock down the translation table and target picking that the relay leans
-on.
+relay needs a real Chrome, so it's exercised manually (see docs/deploy-vps.md).
 
 Run:  pytest tests/test_browser_stream.py -v
 """
@@ -25,30 +23,44 @@ from teams_server import browser_stream as bs  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# select_page_target
+# pick_page_target — both initial selection and dead-target fallback
 # ---------------------------------------------------------------------------
-def test_select_prefers_real_page_over_blank():
+def test_pick_prefers_real_page_over_blank():
     targets = [
         {"type": "background_page", "url": "chrome://x", "webSocketDebuggerUrl": "ws://a"},
         {"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://blank"},
         {"type": "page", "url": "https://accounts.google.com", "webSocketDebuggerUrl": "ws://real"},
     ]
-    assert bs.select_page_target(targets)["webSocketDebuggerUrl"] == "ws://real"
+    assert bs.pick_page_target(targets)["webSocketDebuggerUrl"] == "ws://real"
 
 
-def test_select_falls_back_to_blank_page():
+def test_pick_falls_back_to_blank_page():
     targets = [{"type": "page", "url": "about:blank", "webSocketDebuggerUrl": "ws://blank"}]
-    assert bs.select_page_target(targets)["webSocketDebuggerUrl"] == "ws://blank"
+    assert bs.pick_page_target(targets)["webSocketDebuggerUrl"] == "ws://blank"
 
 
-def test_select_none_when_no_pages():
-    assert bs.select_page_target([{"type": "worker", "webSocketDebuggerUrl": "ws://w"}]) is None
-    assert bs.select_page_target([]) is None
+def test_pick_none_when_no_pages():
+    assert bs.pick_page_target([{"type": "worker", "webSocketDebuggerUrl": "ws://w"}]) is None
+    assert bs.pick_page_target([]) is None
 
 
-def test_select_skips_pages_without_debugger_url():
+def test_pick_skips_pages_without_debugger_url():
     targets = [{"type": "page", "url": "https://x.com"}]  # no ws url
-    assert bs.select_page_target(targets) is None
+    assert bs.pick_page_target(targets) is None
+
+
+def test_pick_excludes_target_id():
+    targets = [
+        {"type": "page", "id": "old", "url": "https://a.com", "webSocketDebuggerUrl": "ws://old"},
+        {"type": "page", "id": "p2", "url": "chrome://settings", "webSocketDebuggerUrl": "ws://p2"},
+    ]
+    fb = bs.pick_page_target(targets, exclude_target_id="old")
+    assert fb["id"] == "p2"
+    # Excluding the only page yields None (fallback exhausted).
+    assert bs.pick_page_target(
+        [{"type": "page", "id": "old", "url": "https://x.com",
+          "webSocketDebuggerUrl": "ws://old"}],
+        exclude_target_id="old") is None
 
 
 # ---------------------------------------------------------------------------

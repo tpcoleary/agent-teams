@@ -119,6 +119,50 @@ def _find_browser() -> Optional[str]:
     return _find_playwright_chromium()
 
 
+def _ensure_profile_persistence(profile: Path) -> None:
+    """Ensure Chrome preferences and local state are configured so cookies,
+    logins, and session tokens persist across restarts and crash recoveries."""
+    default_dir = profile / "Default"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    pref_file = default_dir / "Preferences"
+    prefs = {}
+    if pref_file.exists():
+        try:
+            prefs = json.loads(pref_file.read_text(encoding="utf-8"))
+        except Exception:
+            prefs = {}
+
+    # 1. Restore on startup = 1 ("Continue where you left off", preserving session cookies)
+    prefs.setdefault("session", {})["restore_on_startup"] = 1
+
+    # 2. Mark exit clean so Chrome never triggers session-wipe or 'Restore pages' warning
+    prof = prefs.setdefault("profile", {})
+    prof["exit_type"] = "Normal"
+    prof["exited_cleanly"] = True
+    prof.setdefault("default_content_setting_values", {})["cookies"] = 1
+    prof["password_manager_enabled"] = True
+
+    prefs.setdefault("credentials_enable_service", True)
+    prefs.setdefault("signin", {})["allowed"] = True
+
+    try:
+        pref_file.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.debug("could not update %s: %s", pref_file, e)
+
+    # 3. Mark Local State exit as clean
+    ls_file = profile / "Local State"
+    if ls_file.exists():
+        try:
+            ls = json.loads(ls_file.read_text(encoding="utf-8"))
+            if isinstance(ls.get("profile"), dict):
+                ls["profile"]["exit_type"] = "Normal"
+                ls["profile"]["exited_cleanly"] = True
+                ls_file.write_text(json.dumps(ls, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+
 class TeamBrowserManager:
     """Launches and tracks one persistent Chrome per team: headless for agent
     work, relaunched as a real visible window for a human login."""
@@ -230,6 +274,7 @@ class TeamBrowserManager:
         port = self._assign_port(team_id)
         profile = WORKSPACE_ROOT / team_id / ".browser-profile"
         profile.mkdir(parents=True, exist_ok=True)
+        _ensure_profile_persistence(profile)
         # A stale singleton lock from an unclean exit (or the previous mode) blocks
         # relaunch on the same profile; clear it.
         for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
@@ -247,6 +292,11 @@ class TeamBrowserManager:
             "--no-default-browser-check",
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
+            "--window-size=1920,1080",
+            "--disable-popup-blocking",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "--enable-features=NetworkService,NetworkServiceInProcess",
         ]
         if headful:
             # Real, visible window on the user's own desktop for the human login.
@@ -254,8 +304,15 @@ class TeamBrowserManager:
             # (X11 or Wayland) — we WANT them to see it.
             args += ["--new-window", start_url or "about:blank"]
         else:
-            # Invisible everywhere; always paints so agent screenshots work.
-            args.append("--headless=new")
+            # Invisible everywhere; always paints so agent screenshots and screencasts work at 30+ FPS.
+            args.extend([
+                "--headless=new",
+                "--disable-gpu",
+                "--disable-gpu-compositing",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+            ])
             if self._ua:
                 args.append(f"--user-agent={self._ua}")
             args.append("about:blank")
@@ -375,7 +432,12 @@ class TeamBrowserManager:
             if ws_url:
                 from websockets.sync.client import connect as _wsc
                 with _wsc(ws_url, open_timeout=3, close_timeout=3) as ws:
-                    ws.send(json.dumps({"id": 1, "method": "Browser.close"}))
+                    try:
+                        ws.send(json.dumps({"id": 1, "method": "Storage.flushStorage"}))
+                        ws.recv(timeout=1)
+                    except Exception:
+                        pass
+                    ws.send(json.dumps({"id": 2, "method": "Browser.close"}))
                     try:
                         ws.recv(timeout=3)
                     except Exception:

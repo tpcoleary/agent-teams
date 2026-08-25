@@ -438,6 +438,9 @@ Yes. Pause freezes the queue and preserves pending tasks. Stop interrupts the in
 **Does this work on a headless VPS?**
 Yes. The dashboard is served over HTTP, and the embedded browser takeover streams the headless Chrome via CDP screencast — no display needed. The Docker route also contains the agents' terminal access.
 
+**Can the embedded browser feel like a real browser instead of a screencast?**
+Yes — that's the neko viewer. With Docker available, each team's browser panel becomes a 60fps WebRTC stream of a real, visible Chromium running in a container (`ghcr.io/m1k1o/neko/chromium`): native tabs, omnibox, downloads, audio, sub-300ms input. Your agents keep driving the *same* browser and profile over CDP — the container just exposes `--remote-debugging-port` alongside the stream. Cookies persist in `data/teams/<team>/.browser-profile` exactly as before. It's on by default when Docker answers; set `TEAMS_VIEWER=local` to force the built-in CDP screencast canvas (also used automatically as fallback), or tune with `NEKO_IMAGE`, `NEKO_SCREEN`, `NEKO_ADVERTISE_HOST`. Each team's container costs ~1GB RAM while running; the panel's Stop button tears it down until server restart.
+
 **How do costs work?**
 Every turn logs token counts (input, output, cache read). These are priced against a built-in provider pricing table and summed per-agent and per-team. Set a daily USD (or token) cap per team — agents auto-pause when the limit is hit and resume at 00:00 UTC.
 

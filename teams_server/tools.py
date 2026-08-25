@@ -1108,8 +1108,8 @@ def _request_human_takeover_handler(args: dict, **kwargs) -> str:
         # view embedded in the dashboard. Just make sure a browser exists so the
         # stream has something to attach to.
         try:
-            from teams_server.browser_pool import team_browser_manager
-            shown = bool(team_browser_manager.ensure_team_browser(team_id))
+            from teams_server.neko_pool import resolve_team_cdp_url
+            shown = bool(resolve_team_cdp_url(team_id))
         except Exception as e:
             log.error("[%s] [takeover] ensure_team_browser failed: %s", caller, e)
         access = (

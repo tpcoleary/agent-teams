@@ -280,6 +280,11 @@ async def lifespan(app: FastAPI):
             team_browser_manager.shutdown_all()
         except Exception as e:
             log.warning("[Shutdown] team browser shutdown failed: %s", e)
+        try:
+            from teams_server import neko_pool
+            neko_pool.neko_manager.stop_all()
+        except Exception as e:
+            log.warning("[Shutdown] neko containers shutdown failed: %s", e)
         log.info("[Shutdown] All sweep tasks cancelled")
 
 
@@ -399,6 +404,41 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception as e:
         log.warning("[WS] Error: %s", e)
         await ws_broadcaster.disconnect(ws)
+
+
+@app.get("/teams/{team_id}/browser/viewer")
+async def browser_viewer_info(team_id: str):
+    """Which viewing tech backs this team's browser panel?
+
+    Returns ``{mode:'neko', embed_url, url, cdp_url}`` for the WebRTC neko
+    container, or ``{mode:'local'}`` so the dashboard falls back to the CDP
+    screencast canvas. Starting the container happens here (first call may
+    take a while if the image needs pulling)."""
+    cfg = load_agents_config()
+    if team_id not in cfg.get("teams", {}):
+        return JSONResponse({"error": f"Unknown team '{team_id}'."}, status_code=404)
+    from teams_server import neko_pool
+    if not neko_pool.neko_manager.enabled_for(team_id):
+        return {"mode": "local", "reason": "WebRTC viewer disabled "
+                "(TEAMS_VIEWER=local, or stopped from the panel)"}
+    info = await asyncio.get_running_loop().run_in_executor(
+        None, neko_pool.neko_manager.ensure_neko, team_id)
+    if not info:
+        return {"mode": "local",
+                "reason": neko_pool.neko_manager.last_error_for(team_id)
+                or "neko unavailable"}
+    return {k: info[k] for k in ("mode", "url", "embed_url", "cdp_url")}
+
+
+@app.post("/teams/{team_id}/browser/viewer/stop")
+async def browser_viewer_stop(team_id: str):
+    """Tear down the team's neko container (frees RAM; profile persists).
+    The team stays on the local screencast until the server restarts."""
+    from teams_server import neko_pool
+    neko_pool.neko_manager.disable_team(team_id)
+    await asyncio.get_running_loop().run_in_executor(
+        None, neko_pool.neko_manager.stop_neko, team_id)
+    return {"ok": True}
 
 
 @app.websocket("/teams/{team_id}/browser/ws")

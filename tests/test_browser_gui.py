@@ -668,5 +668,19 @@ def test_steps_caps_count_and_requires_array(ab_recorder):
     assert ab_recorder == []
 
 
+def test_ensure_profile_persistence(tmp_path):
+    from teams_server.browser_pool import _ensure_profile_persistence
+
+    _ensure_profile_persistence(tmp_path)
+    pref_file = tmp_path / "Default" / "Preferences"
+    assert pref_file.exists()
+    prefs = json.loads(pref_file.read_text(encoding="utf-8"))
+    assert prefs["session"]["restore_on_startup"] == 1
+    assert prefs["profile"]["exit_type"] == "Normal"
+    assert prefs["profile"]["exited_cleanly"] is True
+    assert prefs["profile"]["default_content_setting_values"]["cookies"] == 1
+    assert prefs["profile"]["password_manager_enabled"] is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -1,91 +1,96 @@
-"""Embedded browser handover — stream the headless team Chrome into the
-dashboard and inject the human's input back, over a single WebSocket.
+"""Human takeover of a team's headless Chrome over one WebSocket.
 
-This is how a human completes an interactive login / CAPTCHA / 2FA on a
-**display-less VPS**: instead of relaunching Chrome as a visible window on the
-host (browser_pool's "window" mode), we keep the team browser HEADLESS and
-relay it to the operator's own browser via Chrome DevTools Protocol (CDP):
+CDP ``Page.startScreencast`` pushes JPEG frames to the dashboard's <canvas>;
+dashboard input events come back and are translated into CDP ``Input.*`` /
+``Page.navigate``. This is how a human completes a login/CAPTCHA on a
+display-less VPS without touching the agent's session.
 
-  * CDP ``Page.startScreencast`` pushes JPEG frames of the live page; we forward
-    each to the dashboard, which paints it on a <canvas>, then ACK it.
-  * The dashboard sends back mouse / keyboard / scroll / navigation events; we
-    translate them into CDP ``Input.*`` / ``Page.navigate`` commands.
+Three things keep it feeling like a real browser:
+  * LATEST-WINS FRAMES — a slow client drops stale frames instead of queueing
+    them (a backlog is exactly what "the browser keeps freezing" feels like).
+  * STALL WATCHDOG — screencast only emits on repaint; when it goes quiet we
+    force a ``Page.captureScreenshot`` so the view can't look frozen.
+  * TAB DEATH SURVIVAL — if the streamed page closes under us (OAuth popups
+    self-close), hop to another live page or mint a blank one.
 
-No relaunch, no host display, no cookie-flush race — the agent's own headless
-session is driven directly, so when the human finishes, the agent resumes on the
-exact authenticated session.
-
-The pure functions here (``select_page_target``, ``translate_client_message``)
-are unit-tested with a fake CDP socket; ``relay`` wires them to live sockets.
+Protocol server→client: frame, navigated, tabs, loading, stall, ping, error.
+Protocol client→server: mouse, key, text, navigate, refresh, resize,
+switch_tab, new_tab, close_tab, back, forward, ping.
 """
 
 import asyncio
 import json
 import logging
+import time
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-log = logging.getLogger("teams.browser.stream")
+# Screencast tuning — standard 1440x900 desktop viewport at JPEG quality 60
+# delivers crisp rendering and fast software compression (<8ms) for 30+ FPS.
+SCREENCAST_PARAMS = {"format": "jpeg", "quality": 60,
+                     "maxWidth": 1440, "maxHeight": 900, "everyNthFrame": 1}
+DEVICE_SCALE = 1.0
 
-# Screencast tuning — JPEG keeps frames small enough to stream smoothly;
-# quality 55 + maxHeight 900 yields fast software compression (<15ms) in Chromium.
-_SCREENCAST_PARAMS = {
-    "format": "jpeg",
-    "quality": 55,
-    "maxWidth": 1280,
-    "maxHeight": 900,
-    "everyNthFrame": 1,
-}
+_STALL_AFTER_S = 4.0      # screencast silence before nudging a repaint
+_TICK_S = 2.5             # watchdog/pinger tick
+_PING_EVERY_S = 15.0
+_TABS_DEBOUNCE_S = 0.25   # let Target.* storms settle before refetching /json
+_MAX_HOPS = 20            # give up after this many auto page-hops in a row
+
+_INTERNAL_PREFIXES = ("about:", "chrome:", "devtools:", "chrome-extension:")
 
 
 def _cdp_targets(base_url: str) -> List[Dict[str, Any]]:
-    """All CDP targets from ``http://127.0.0.1:<port>/json`` (synchronous —
-    callers run it in an executor)."""
     with urllib.request.urlopen(f"{base_url}/json", timeout=3) as r:
         return json.load(r)
 
 
-def select_page_target(targets: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Pick the page the human should drive: the first real page target
-    (prefer a non-blank, non-internal URL — that's the page the agent was
-    blocked on), falling back to any page. Pure → unit-testable."""
-    pages = [t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
-    if not pages:
-        return None
+def _cdp_http_json(url: str) -> Dict[str, Any]:
+    """CDP HTTP control endpoints require PUT (Chrome rejects GET for
+    /json/new and /json/close). Returns parsed body, {} when empty."""
+    req = urllib.request.Request(url, method="PUT")
+    with urllib.request.urlopen(req, timeout=3) as r:
+        body = r.read().decode("utf-8", "replace").strip()
+    return json.loads(body) if body else {}
+
+
+def pick_page_target(targets: List[Dict[str, Any]],
+                     exclude_target_id: Optional[str] = None
+                     ) -> Optional[Dict[str, Any]]:
+    """The page to stream: first real URL wins over blank/internal ones.
+    ``exclude_target_id`` omits a dead/current target (fallback picking).
+    Pure → unit-testable."""
+    pages = [t for t in targets
+             if t.get("type") == "page"
+             and t.get("webSocketDebuggerUrl")
+             and (exclude_target_id is None or t.get("id") != exclude_target_id)]
     for t in pages:
         u = t.get("url", "") or ""
-        if u and not u.startswith(("about:", "chrome:", "devtools:", "chrome-extension:")):
+        if u and not u.startswith(_INTERNAL_PREFIXES):
             return t
-    return pages[0]
+    return pages[0] if pages else None
 
 
-def translate_client_message(msg: Dict[str, Any], next_id) -> Optional[Dict[str, Any]]:
-    """Map one dashboard→server message to a CDP command dict (or None to
-    ignore). ``next_id`` is a zero-arg callable returning the next CDP message
-    id. Pure apart from the id source → unit-testable.
+def translate_client_message(msg: Dict[str, Any], next_id
+                             ) -> Optional[Dict[str, Any]]:
+    """Map one dashboard→server message to a CDP command dict (None = ignore).
 
-    Client message shapes:
-      {type:'mouse', action:'pressed'|'released'|'moved'|'wheel',
-       x,y, button?, deltaX?, deltaY?, clickCount?, modifiers?}
-      {type:'key', action:'down'|'up'|'char', key,code,text?,
-       windowsVirtualKeyCode?, modifiers?}
-      {type:'text', text}                         # paste / insert
-      {type:'navigate', url}
+    Coordinates pass through unchanged: screencast metadata (deviceWidth/
+    Height) is DIPs == CSS pixels, exactly what CDP Input.* expects.
+
+    Session-level messages (tabs management, history, refresh, resize) are
+    handled by relay() itself.
     """
     t = msg.get("type")
 
     if t == "mouse":
-        action = msg.get("action")
-        cdp_type = {
-            "pressed": "mousePressed", "released": "mouseReleased",
-            "moved": "mouseMoved", "wheel": "mouseWheel",
-        }.get(action)
+        cdp_type = {"pressed": "mousePressed", "released": "mouseReleased",
+                    "moved": "mouseMoved", "wheel": "mouseWheel"}.get(msg.get("action"))
         if not cdp_type:
             return None
         params: Dict[str, Any] = {
             "type": cdp_type,
-            "x": float(msg.get("x", 0)),
-            "y": float(msg.get("y", 0)),
+            "x": float(msg.get("x", 0)), "y": float(msg.get("y", 0)),
             "modifiers": int(msg.get("modifiers", 0)),
         }
         if cdp_type in ("mousePressed", "mouseReleased"):
@@ -100,12 +105,8 @@ def translate_client_message(msg: Dict[str, Any], next_id) -> Optional[Dict[str,
         cdp_type = {"down": "keyDown", "up": "keyUp", "char": "char"}.get(msg.get("action"))
         if not cdp_type:
             return None
-        params = {
-            "type": cdp_type,
-            "modifiers": int(msg.get("modifiers", 0)),
-            "key": msg.get("key", ""),
-            "code": msg.get("code", ""),
-        }
+        params = {"type": cdp_type, "modifiers": int(msg.get("modifiers", 0)),
+                  "key": msg.get("key", ""), "code": msg.get("code", "")}
         if msg.get("text"):
             params["text"] = msg["text"]
         if msg.get("windowsVirtualKeyCode") is not None:
@@ -127,36 +128,64 @@ def translate_client_message(msg: Dict[str, Any], next_id) -> Optional[Dict[str,
     return None
 
 
-async def relay(client_ws, team_id: str) -> None:
-    """Bridge a dashboard control socket to the team's headless Chrome.
+class _LatestSlot:
+    """Single-slot latest-wins mailbox between the CDP pump and the sender."""
 
-    ``client_ws`` is an already-accepted (and authenticated) FastAPI WebSocket.
-    Runs until either side disconnects, then cleans up the screencast and the
-    CDP socket. Errors are reported to the client as a ``{type:'error'}`` frame.
-    """
+    def __init__(self) -> None:
+        self.item: Optional[Dict[str, Any]] = None
+        self._evt = asyncio.Event()
+
+    def put(self, item: Dict[str, Any]) -> None:
+        self.item = item
+        self._evt.set()
+
+    async def get(self) -> Optional[Dict[str, Any]]:
+        await self._evt.wait()
+        item, self.item = self.item, None
+        self._evt.clear()
+        # A put() racing the read above would strand its item until the NEXT
+        # frame — re-arm so the last-ever frame always goes out promptly even
+        # if the page goes static right after.
+        if self.item is not None:
+            self._evt.set()
+        return item
+
+
+async def _send_error(client_ws, message: str) -> None:
+    try:
+        await client_ws.send_text(
+            json.dumps({"type": "error", "payload": {"message": message}}))
+    except Exception:
+        pass
+
+
+async def relay(client_ws, team_id: str) -> None:
+    """Bridge an accepted dashboard WebSocket to the team's headless Chrome.
+    Runs until either side disconnects."""
     from websockets.asyncio.client import connect as ws_connect
-    from teams_server.browser_pool import team_browser_manager
 
     loop = asyncio.get_running_loop()
+    from teams_server.neko_pool import resolve_team_cdp_url
 
-    cdp_url = await loop.run_in_executor(None, team_browser_manager.ensure_team_browser, team_id)
+    cdp_url = await loop.run_in_executor(None, resolve_team_cdp_url, team_id)
     if not cdp_url:
-        await client_ws.send_text(json.dumps({"type": "error",
-            "payload": {"message": "No browser available on this host."}}))
+        await _send_error(client_ws, "No browser available on this host.")
         return
 
     try:
         targets = await loop.run_in_executor(None, _cdp_targets, cdp_url)
     except Exception as e:
-        await client_ws.send_text(json.dumps({"type": "error",
-            "payload": {"message": f"Could not list browser tabs: {e}"}}))
+        await _send_error(client_ws, f"Could not list browser tabs: {e}")
         return
 
-    target = select_page_target(targets)
+    target = pick_page_target(targets)
     if not target:
-        await client_ws.send_text(json.dumps({"type": "error",
-            "payload": {"message": "No page open in the team browser."}}))
-        return
+        try:
+            target = await loop.run_in_executor(
+                None, _cdp_http_json, f"{cdp_url}/json/new?about:blank")
+        except Exception as e:
+            await _send_error(client_ws, f"No page open and could not create one: {e}")
+            return
 
     _id = 0
 
@@ -165,179 +194,370 @@ async def relay(client_ws, team_id: str) -> None:
         _id += 1
         return _id
 
-    # The page being driven can change mid-session: an OAuth login often opens a
-    # popup as a NEW target, so the human needs to switch tabs and drive that one.
-    # We reconnect the CDP socket to the requested target and keep the SAME client
-    # socket. `switch_to` carries the next target's debugger URL out of the input
-    # pump; `client_gone` ends the outer loop for good.
-    current_ws_url = target["webSocketDebuggerUrl"]
-    switch_to = {"url": None}
-    client_gone = {"v": False}
-    # Last viewport the client asked for, reapplied after a tab switch / reconnect.
-    viewport = {"w": 1280, "h": 800}
+    # An OAuth login often opens a popup as a NEW target, so tab switching
+    # reconnects the CDP socket while keeping the SAME client socket.
+    state = {
+        "target": dict(target),
+        "switch_to": None,                # debugger ws url of the next target
+        "client_gone": False,
+        "vw": 1440, "vh": 900,
+        "pending_shot": set(),            # ids of forced screenshots in flight
+        "hops": 0,
+    }
+    loading = False
+    stall_notified = False
+    last_frame_at = time.monotonic()
+    sock_holder: Dict[str, Any] = {"cdp": None}
+    frame_slot = _LatestSlot()
+    tabs_dirty = asyncio.Event()
 
-    async def _resolve_target_ws(target_id: str) -> Optional[str]:
-        tabs = await loop.run_in_executor(None, _cdp_targets, cdp_url)
-        for t in tabs:
-            if t.get("id") == target_id and t.get("webSocketDebuggerUrl"):
-                return t["webSocketDebuggerUrl"]
+    async def send_client(payload: Dict[str, Any]) -> None:
+        nonlocal state
+        try:
+            await client_ws.send_text(json.dumps(payload))
+        except Exception:
+            state["client_gone"] = True
+
+    def push_loading(v: bool) -> None:
+        nonlocal loading
+        if loading != v:
+            loading = v
+            asyncio.create_task(send_client(
+                {"type": "loading", "payload": {"loading": v}}))
+
+    async def fetch_tabs() -> List[Dict[str, Any]]:
+        try:
+            return await loop.run_in_executor(None, _cdp_targets, cdp_url)
+        except Exception:
+            return []
+
+    async def create_blank_tab() -> Optional[str]:
+        try:
+            info = await loop.run_in_executor(
+                None, _cdp_http_json, f"{cdp_url}/json/new?about:blank")
+        except Exception as e:
+            log.debug("[%s] could not open a fresh blank tab: %s", team_id, e)
+            return None
+        if info.get("webSocketDebuggerUrl"):
+            state["target"] = info
+            return info["webSocketDebuggerUrl"]
         return None
 
-    try:
-        while not client_gone["v"]:
-            switch_to["url"] = None
-            async with ws_connect(current_ws_url, max_size=64 * 1024 * 1024,
-                                  open_timeout=10) as cdp:
-                await cdp.send(json.dumps({"id": next_id(), "method": "Page.enable"}))
-                await cdp.send(json.dumps({"id": next_id(), "method": "DOM.enable"}))
+    async def sender() -> None:
+        nonlocal last_frame_at, stall_notified
+        while True:
+            payload = await frame_slot.get()
+            if payload is not None:
+                await send_client({"type": "frame", "payload": payload})
+                last_frame_at = time.monotonic()
+                stall_notified = False
+
+    async def tabs_pusher() -> None:
+        """Debounced /json refetches. Target events arrive in storms during
+        page loads; fetching inline in the frame pump stalled every frame
+        behind a synchronous HTTP round-trip. Never do that again."""
+        while True:
+            await tabs_dirty.wait()
+            await asyncio.sleep(_TABS_DEBOUNCE_S)
+            tabs_dirty.clear()
+            tabs = await fetch_tabs()
+            await send_client({"type": "tabs", "payload": {
+                "current": state["target"].get("id"),
+                "tabs": [{"targetId": t.get("id"), "title": t.get("title"),
+                          "url": t.get("url")}
+                         for t in tabs if t.get("type") == "page"]}})
+
+    async def heartbeat() -> None:
+        """Watchdog + keepalive in one tick loop. Screencast only emits on
+        repaint, so silence alone isn't an error — past _STALL_AFTER_S we tell
+        the client (it shows 'waiting') and force a screenshot as a repaint
+        cure, capped at 3 consecutive nudges so static pages don't eat latency
+        spikes forever. Pings let the client tell idle from dead."""
+        nonlocal stall_notified, last_frame_at
+        nudges = 0
+        last_ping = time.monotonic()
+        while True:
+            await asyncio.sleep(_TICK_S)
+            cdp = sock_holder["cdp"]
+            if time.monotonic() - last_ping >= _PING_EVERY_S:
+                last_ping = time.monotonic()
+                await send_client({"type": "ping", "payload": {}})
+                if cdp is not None:
+                    try:
+                        await cdp.send(json.dumps({"id": next_id(), "method": "Storage.flushStorage"}))
+                    except Exception:
+                        pass
+            if cdp is None:
+                continue
+            idle = time.monotonic() - last_frame_at
+            if idle < _STALL_AFTER_S:
+                nudges = 0
+                continue
+            if not stall_notified:
+                stall_notified = True
+                await send_client({"type": "stall",
+                                   "payload": {"seconds": round(idle, 1)}})
+            if nudges >= 3:
+                continue
+            nudges += 1
+            sid = next_id()
+            state["pending_shot"].add(sid)
+            try:
+                await cdp.send(json.dumps({"id": sid,
+                    "method": "Page.captureScreenshot",
+                    "params": {"format": "jpeg", "quality": 68}}))
+            except Exception:
+                pass  # reconnect path handles a dead socket
+
+    bg_tasks = [asyncio.create_task(sender()),
+                asyncio.create_task(tabs_pusher()),
+                asyncio.create_task(heartbeat())]
+
+    async def pump_cdp_to_client(cdp) -> None:
+        """Forward screencast frames and page events to the dashboard. Stays
+        cheap: no blocking calls, no awaits on slow sockets."""
+        from websockets.exceptions import ConnectionClosed
+
+        try:
+            async for raw in cdp:
                 try:
-                    await cdp.send(json.dumps({"id": next_id(), "method": "Page.bringToFront"}))
+                    evt = json.loads(raw)
                 except Exception:
-                    pass
-                # Make the page lay out at the panel's size so it isn't clipped.
-                # The client sends a 'resize' as soon as it has measured the
-                # canvas; until then use the last known size (or a sane default).
-                await cdp.send(json.dumps({"id": next_id(),
-                    "method": "Emulation.setDeviceMetricsOverride",
-                    "params": {"width": viewport["w"], "height": viewport["h"],
-                               "deviceScaleFactor": 1, "mobile": False}}))
-                await cdp.send(json.dumps({"id": next_id(),
-                    "method": "Page.startScreencast", "params": _SCREENCAST_PARAMS}))
+                    continue
+                method = evt.get("method")
 
-                # Send initial target metadata and tabs list to the client
+                if method is None:
+                    mid = evt.get("id")
+                    # Forced-screenshot replies double as fresh frames.
+                    if mid in state["pending_shot"]:
+                        state["pending_shot"].discard(mid)
+                        data = (evt.get("result") or {}).get("data")
+                        if data:
+                            frame_slot.put({
+                                "data": data,
+                                # Same DIP-space dims as screencast metadata so
+                                # the canvas never flips resolution mid-session.
+                                "deviceWidth": state["vw"],
+                                "deviceHeight": state["vh"],
+                                "offsetTop": 0, "pageScaleFactor": 1})
+                    continue
+
+                p = evt.get("params", {})
+                if method == "Page.screencastFrame":
+                    md = p.get("metadata", {})
+                    sid = p.get("sessionId")
+                    if sid is not None:
+                        try:
+                            await cdp.send(json.dumps({"id": next_id(),
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": sid}}))
+                        except Exception:
+                            pass
+                    frame_slot.put({
+                        "data": p.get("data", ""),
+                        "deviceWidth": md.get("deviceWidth"),
+                        "deviceHeight": md.get("deviceHeight"),
+                        "offsetTop": md.get("offsetTop", 0),
+                        "pageScaleFactor": md.get("pageScaleFactor", 1)})
+                elif method in ("Page.frameNavigated", "Page.navigatedWithinDocument"):
+                    frame = p.get("frame") or {}
+                    if method == "Page.frameNavigated" and frame.get("parentId"):
+                        continue
+                    u = frame.get("url") or p.get("url", "")
+                    if u:
+                        await send_client({"type": "navigated", "payload": {
+                            "url": u, "targetId": state["target"].get("id", "")}})
+                elif method == "Page.frameStartedLoading":
+                    if not p.get("frame", {}).get("parentId"):
+                        push_loading(True)
+                elif method == "Page.frameStoppedLoading":
+                    if not p.get("frame", {}).get("parentId"):
+                        push_loading(False)
+                        try:
+                            await cdp.send(json.dumps({"id": next_id(), "method": "Storage.flushStorage"}))
+                        except Exception:
+                            pass
+                elif method.startswith("Target.target"):
+                    tabs_dirty.set()  # debounced task does the HTTP work
+        except ConnectionClosed:
+            # Expected: tab closed / renderer died / browser quit. The relay
+            # loop hops to another live page or ends the session.
+            log.debug("[%s] CDP socket closed", team_id)
+
+    async def pump_client_to_cdp(cdp) -> None:
+        """Dashboard input → CDP; session-level commands handled locally.
+        Returns when the client disconnects or asks to switch targets."""
+        while True:
+            try:
+                raw = await client_ws.receive_text()
+            except Exception:
+                state["client_gone"] = True
+                return
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            mtype = msg.get("type")
+
+            if mtype in (None, "ping"):
+                continue
+
+            if mtype == "switch_tab":
+                tid = msg.get("targetId", "")
+                meta = next((t for t in await fetch_tabs()
+                             if t.get("id") == tid), None)
+                if meta and meta.get("webSocketDebuggerUrl"):
+                    state["target"] = meta
+                    state["switch_to"] = meta["webSocketDebuggerUrl"]
+                    return
+                tabs_dirty.set()
+                continue
+
+            if mtype == "new_tab":
+                url = await create_blank_tab()
+                if url:
+                    state["switch_to"] = url
+                    return
+                tabs_dirty.set()
+                continue
+
+            if mtype == "close_tab":
+                tid = msg.get("targetId", "")
+                if not tid:
+                    continue
+                closing_current = tid == state["target"].get("id")
                 try:
-                    await client_ws.send_text(json.dumps({
-                        "type": "navigated",
-                        "payload": {
-                            "url": target.get("url", ""),
-                            "title": target.get("title", ""),
-                            "targetId": target.get("id", ""),
-                        },
-                    }))
-                    initial_tabs = await loop.run_in_executor(None, _cdp_targets, cdp_url)
-                    await client_ws.send_text(json.dumps({"type": "tabs", "payload": {
-                        "current": target.get("id"),
-                        "tabs": [{"targetId": t.get("id"), "title": t.get("title"),
-                                  "url": t.get("url")}
-                                 for t in initial_tabs if t.get("type") == "page"]}}))
+                    await loop.run_in_executor(
+                        None, _cdp_http_json, f"{cdp_url}/json/close/{tid}")
                 except Exception as e:
-                    log.debug("[%s] initial browser metadata push failed: %s", team_id, e)
-
-                async def pump_cdp_to_client() -> None:
-                    """Forward screencast frames and navigation events to the dashboard."""
-                    async for raw in cdp:
-                        try:
-                            evt = json.loads(raw)
-                        except Exception:
-                            continue
-                        method = evt.get("method")
-                        if method == "Page.screencastFrame":
-                            p = evt.get("params", {})
-                            md = p.get("metadata", {})
-                            sid = p.get("sessionId")
-                            if sid is not None:
-                                try:
-                                    await cdp.send(json.dumps({"id": next_id(),
-                                        "method": "Page.screencastFrameAck",
-                                        "params": {"sessionId": sid}}))
-                                except Exception:
-                                    pass
-                            await client_ws.send_text(json.dumps({
-                                "type": "frame",
-                                "payload": {
-                                    "data": p.get("data", ""),
-                                    "deviceWidth": md.get("deviceWidth"),
-                                    "deviceHeight": md.get("deviceHeight"),
-                                    "offsetTop": md.get("offsetTop", 0),
-                                    "pageScaleFactor": md.get("pageScaleFactor", 1),
-                                },
-                            }))
-                        elif method == "Page.frameNavigated":
-                            frame = evt.get("params", {}).get("frame", {})
-                            # Only update URL bar on main frame navigation
-                            if not frame.get("parentId"):
-                                u = frame.get("url", "")
-                                if u:
-                                    await client_ws.send_text(json.dumps({
-                                        "type": "navigated",
-                                        "payload": {"url": u, "targetId": target.get("id", "")},
-                                    }))
-                        elif method == "Page.navigatedWithinDocument":
-                            u = evt.get("params", {}).get("url", "")
-                            if u:
-                                await client_ws.send_text(json.dumps({
-                                    "type": "navigated",
-                                    "payload": {"url": u, "targetId": target.get("id", "")},
-                                }))
-
-                async def pump_client_to_cdp() -> None:
-                    """Translate dashboard input → CDP; handle tab list/switch locally.
-                    Returns when the client disconnects or asks to switch tabs."""
-                    while True:
-                        try:
-                            raw = await client_ws.receive_text()
-                        except Exception:
-                            client_gone["v"] = True
+                    log.debug("[%s] close_tab %s failed: %s", team_id, tid, e)
+                if closing_current:
+                    # Last page closed: hop to another live one, else blank.
+                    await asyncio.sleep(0.15)  # let Chrome tear the target down
+                    fb = pick_page_target(await fetch_tabs(),
+                                          exclude_target_id=tid)
+                    if fb:
+                        state["target"] = fb
+                        state["switch_to"] = fb["webSocketDebuggerUrl"]
+                    else:
+                        url = await create_blank_tab()
+                        if url:
+                            state["switch_to"] = url
                             return
-                        try:
-                            msg = json.loads(raw)
-                        except Exception:
-                            continue
-                        mtype = msg.get("type")
-                        if mtype == "tabs":
-                            tabs = await loop.run_in_executor(None, _cdp_targets, cdp_url)
-                            await client_ws.send_text(json.dumps({"type": "tabs", "payload": {
-                                "current": target.get("id"),
-                                "tabs": [{"targetId": t.get("id"), "title": t.get("title"),
-                                          "url": t.get("url")}
-                                         for t in tabs if t.get("type") == "page"]}}))
-                            continue
-                        if mtype == "switch_tab":
-                            url = await _resolve_target_ws(msg.get("targetId", ""))
-                            if url:
-                                target["id"] = msg.get("targetId", "")
-                                switch_to["url"] = url
-                                return  # break out to reconnect on the new target
-                            continue
-                        if mtype == "refresh":
-                            await cdp.send(json.dumps({"id": next_id(), "method": "Page.reload"}))
-                            continue
-                        if mtype == "resize":
-                            w = int(msg.get("width") or 0)
-                            h = int(msg.get("height") or 0)
-                            if w > 0 and h > 0:
-                                viewport["w"], viewport["h"] = w, h
-                                await cdp.send(json.dumps({"id": next_id(),
-                                    "method": "Emulation.setDeviceMetricsOverride",
-                                    "params": {"width": w, "height": h,
-                                               "deviceScaleFactor": 1, "mobile": False}}))
-                            continue
-                        if mtype == "ping":
-                            continue
-                        cmd = translate_client_message(msg, next_id)
-                        if cmd is not None:
-                            await cdp.send(json.dumps(cmd))
+                        state["client_gone"] = True
+                    return
+                tabs_dirty.set()
+                continue
+
+            if mtype in ("back", "forward"):
+                expr = "history.back()" if mtype == "back" else "history.forward()"
+                await cdp.send(json.dumps({"id": next_id(),
+                    "method": "Runtime.evaluate", "params": {"expression": expr}}))
+                continue
+
+            if mtype == "refresh":
+                push_loading(True)
+                await cdp.send(json.dumps(
+                    {"id": next_id(), "method": "Page.reload"}))
+                continue
+
+            if mtype == "resize":
+                w, h = int(msg.get("width") or 0), int(msg.get("height") or 0)
+                if w > 400 and h > 300 and (abs(w - state["vw"]) > 50 or abs(h - state["vh"]) > 50):
+                    state["vw"], state["vh"] = w, h
+                    await cdp.send(json.dumps({"id": next_id(),
+                        "method": "Emulation.setDeviceMetricsOverride",
+                        "params": {"width": w, "height": h,
+                                   "deviceScaleFactor": DEVICE_SCALE,
+                                   "mobile": False}}))
+                continue
+
+            cmd = translate_client_message(msg, next_id)
+            if cmd is not None:
+                if cmd.get("method") == "Page.navigate":
+                    push_loading(True)
+                await cdp.send(json.dumps(cmd))
+
+    try:
+        while not state["client_gone"]:
+            state["switch_to"] = None
+            async with ws_connect(state["target"]["webSocketDebuggerUrl"],
+                                  max_size=64 * 1024 * 1024,
+                                  open_timeout=10) as cdp:
+                sock_holder["cdp"] = cdp
+                last_frame_at = time.monotonic()
+                stall_notified = False
+                for cmd in (
+                    {"method": "Page.enable"},
+                    {"method": "Target.setDiscoverTargets",
+                     "params": {"discover": True}},
+                    {"method": "Page.bringToFront"},
+                    {"method": "Emulation.setDeviceMetricsOverride",
+                     "params": {"width": state["vw"], "height": state["vh"],
+                                "deviceScaleFactor": DEVICE_SCALE,
+                                "mobile": False}},
+                    {"method": "Page.startScreencast", "params": SCREENCAST_PARAMS},
+                ):
+                    try:
+                        await cdp.send(json.dumps({"id": next_id(), **cmd}))
+                    except Exception:
+                        pass
+
+                tgt = state["target"]
+                await send_client({"type": "navigated", "payload": {
+                    "url": tgt.get("url", ""), "title": tgt.get("title", ""),
+                    "targetId": tgt.get("id", "")}})
+                tabs_dirty.set()
+                push_loading(False)
 
                 done, pending = await asyncio.wait(
-                    [asyncio.create_task(pump_cdp_to_client()),
-                     asyncio.create_task(pump_client_to_cdp())],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                    [asyncio.create_task(pump_cdp_to_client(cdp)),
+                     asyncio.create_task(pump_client_to_cdp(cdp))],
+                    return_when=asyncio.FIRST_COMPLETED)
                 for task in pending:
                     task.cancel()
-                # If the CDP side ended (tab closed) with no explicit switch, stop.
-                if not switch_to["url"]:
-                    client_gone["v"] = True
+                # Retrieve exceptions (incl. cancelled) — unretrieved ones make
+                # asyncio log scary "Task exception was never retrieved" noise.
+                for task in list(done) + list(pending):
+                    try:
+                        task.exception()
+                    except Exception:
+                        pass
+                sock_holder["cdp"] = None
                 try:
-                    await cdp.send(json.dumps({"id": next_id(), "method": "Page.stopScreencast"}))
+                    await cdp.send(json.dumps(
+                        {"id": next_id(), "method": "Page.stopScreencast"}))
                 except Exception:
                     pass
-            if switch_to["url"]:
-                current_ws_url = switch_to["url"]
+
+            if state["client_gone"]:
+                break
+            if state["switch_to"]:
+                state["hops"] = 0
+                continue
+
+            # Streamed page died under us (closed popup/tab) — hop to another
+            # live page, or mint a blank one, instead of killing the session.
+            state["hops"] += 1
+            if state["hops"] > _MAX_HOPS:
+                await _send_error(client_ws,
+                                  "Browser pages kept closing — stopped streaming.")
+                break
+            await asyncio.sleep(0.2)  # let Chrome settle its target list
+            fb = pick_page_target(await fetch_tabs(),
+                                  exclude_target_id=state["target"].get("id"))
+            if fb:
+                log.info("[%s] streamed page closed — switching to %s",
+                         team_id, fb.get("url") or "blank tab")
+                state["target"] = fb
+                continue
+            if not await create_blank_tab():
+                await _send_error(
+                    client_ws, "The streamed page closed and no other page is open.")
+                break
     except Exception as e:
         log.warning("[%s] [browser-stream] relay ended: %s", team_id, e)
-        try:
-            await client_ws.send_text(json.dumps({"type": "error",
-                "payload": {"message": f"Browser stream error: {e}"}}))
-        except Exception:
-            pass
+        await _send_error(client_ws, f"Browser stream error: {e}")
+    finally:
+        for task in bg_tasks:
+            task.cancel()
