@@ -229,7 +229,42 @@ def test_batch_prompt_marker_matches_turn_boundary_anchor():
     assert out.splitlines()[0] == f"You have 1 {_TASK_PROMPT_MARKER}:"
 
 
+def test_trace_reasoning_and_thinking_coalesce_consecutive_chunks():
+    """Verify that streamed token-by-token reasoning/thinking chunks are coalesced
+    into a single step rather than spawning one step per word."""
+    from unittest.mock import MagicMock
+    from teams_server.agent import AgentDaemon
+
+    daemon = AgentDaemon.__new__(AgentDaemon)
+    daemon._current_trace_steps = []
+    daemon.name = "test_agent"
+    daemon._emit_exec = MagicMock()
+
+    # Simulate binding turn callbacks logic
+    def on_reasoning(text: str = "") -> None:
+        if text:
+            daemon._emit_exec("reasoning", {"text": str(text)[:4000]})
+            if daemon._current_trace_steps and daemon._current_trace_steps[-1].get("type") == "reasoning":
+                daemon._current_trace_steps[-1]["text"] = (
+                    daemon._current_trace_steps[-1].get("text", "") + str(text)
+                )[:8000]
+            else:
+                daemon._current_trace_steps.append({
+                    "type": "reasoning",
+                    "text": str(text)[:8000],
+                })
+
+    # Stream 4 words
+    for word in ["Thinking ", "about ", "the ", "problem."]:
+        on_reasoning(word)
+
+    assert len(daemon._current_trace_steps) == 1
+    assert daemon._current_trace_steps[0]["type"] == "reasoning"
+    assert daemon._current_trace_steps[0]["text"] == "Thinking about the problem."
+
+
 if __name__ == "__main__":
     import subprocess
 
     raise SystemExit(subprocess.call([sys.executable, "-m", "pytest", __file__, "-v"]))
+

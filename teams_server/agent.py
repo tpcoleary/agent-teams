@@ -2176,10 +2176,15 @@ class AgentDaemon:
         def on_thinking(text: str = "") -> None:
             self._emit_exec("thinking", {"text": (text or "")[:200]})
             try:
-                self._current_trace_steps.append({
-                    "type": "thinking", "ts": time.time(),
-                    "text": (text or "")[:500],
-                })
+                if self._current_trace_steps and self._current_trace_steps[-1].get("type") == "thinking":
+                    self._current_trace_steps[-1]["text"] = (
+                        self._current_trace_steps[-1].get("text", "") + " " + (text or "")
+                    )[:1000].strip()
+                else:
+                    self._current_trace_steps.append({
+                        "type": "thinking", "ts": time.time(),
+                        "text": (text or "")[:500],
+                    })
             except Exception:
                 pass
 
@@ -2187,10 +2192,15 @@ class AgentDaemon:
             if text:
                 self._emit_exec("reasoning", {"text": str(text)[:4000]})
                 try:
-                    self._current_trace_steps.append({
-                        "type": "reasoning", "ts": time.time(),
-                        "text": str(text)[:1000],
-                    })
+                    if self._current_trace_steps and self._current_trace_steps[-1].get("type") == "reasoning":
+                        self._current_trace_steps[-1]["text"] = (
+                            self._current_trace_steps[-1].get("text", "") + str(text)
+                        )[:8000]
+                    else:
+                        self._current_trace_steps.append({
+                            "type": "reasoning", "ts": time.time(),
+                            "text": str(text)[:8000],
+                        })
                 except Exception:
                     pass
 

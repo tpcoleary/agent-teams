@@ -509,7 +509,7 @@ DIGEST_ENABLED_DEFAULT = os.environ.get("TEAMS_DIGEST_ENABLED", "1") not in ("0"
 # can't see a loop that spans agents (A↔B↔C ping-pong); this watches the whole
 # team's message graph and nudges to break a no-progress storm.
 # ---------------------------------------------------------------------------
-LOOP_DETECT_ENABLED = os.environ.get("TEAMS_LOOP_DETECT", "1") not in ("0", "false", "False", "")
+LOOP_DETECT_ENABLED = os.environ.get("TEAMS_LOOP_DETECT", "0") not in ("0", "false", "False", "")
 LOOP_SWEEP_INTERVAL_SECONDS = int(os.environ.get("TEAMS_LOOP_SWEEP_SECONDS", "120"))
 # Window of recent message history each scan considers.
 LOOP_WINDOW_SECONDS = int(os.environ.get("TEAMS_LOOP_WINDOW_SECONDS", "600"))

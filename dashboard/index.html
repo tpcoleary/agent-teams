@@ -261,47 +261,93 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .ws-item .ws-ic { color: var(--text-dim); flex-shrink: 0; display: flex; }
 .ws-item .ws-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
 .ws-item .ws-size { margin-left: auto; font-size: 9.5px; color: var(--text-dim); flex-shrink: 0; }
-.message-list { display: flex; flex-direction: column; gap: 8px; }
-.msg-block { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; animation: slideIn 0.25s ease-out; }
+.unified-chat-stream { display: flex; flex-direction: column; }
+.message-list { display: flex; flex-direction: column; gap: 10px; }
+.msg-block { --msg-accent: var(--border-strong); position: relative; background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--msg-accent); border-radius: var(--r-md); overflow: hidden; animation: slideIn 0.25s ease-out; }
+.msg-block.assistant { --msg-accent: var(--idle); background: linear-gradient(110deg, rgba(62,207,142,0.035), transparent 42%), var(--bg-card); }
+.msg-block.user { --msg-accent: var(--accent); background: linear-gradient(110deg, var(--accent-soft), transparent 44%), var(--bg-card); }
+.msg-block.system { --msg-accent: var(--text-dim); background: rgba(142,142,150,0.035); }
+.msg-block.tool-call, .msg-block.tool-result { --msg-accent: var(--tool); background: linear-gradient(110deg, rgba(69,214,232,0.04), transparent 44%), var(--bg-card); }
+.msg-block.automation { --msg-accent: var(--busy); background: linear-gradient(110deg, rgba(245,181,68,0.055), transparent 48%), var(--bg-card); }
 @keyframes slideIn { from { opacity:0; transform: translateY(6px); } }
-.msg-header { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; font-size: 11px; transition: background 0.15s; }
+.msg-header { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; user-select: none; font-size: 11px; text-align: left; transition: background 0.15s; }
 .msg-header:hover { background: var(--bg-hover); }
-.msg-role-badge { padding: 2px 7px; border-radius: var(--r-sm); font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+.msg-header:focus-visible, .tool-disclosure-toggle:focus-visible, .automation-context-toggle:focus-visible { outline: 2px solid var(--msg-accent, var(--accent)); outline-offset: -2px; }
+.msg-role-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: var(--r-sm); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
 .msg-role-badge.user { background: var(--accent-soft); color: var(--text); }
 .msg-role-badge.assistant { background: rgba(62,207,142,0.13); color: var(--idle); }
 .msg-role-badge.system { background: rgba(142,142,150,0.12); color: var(--text-muted); }
-.msg-role-badge.tool { background: rgba(69,214,232,0.12); color: var(--tool); }
-.msg-time { margin-left: auto; font-size: 10px; font-family: var(--font-mono); color: var(--text-dim); }
-.msg-body { padding: 10px 13px 12px; font-size: 12.5px; line-height: 1.6; color: var(--text); word-break: break-word; border-top: 1px solid var(--border); }
+.msg-role-badge.tool-call, .msg-role-badge.tool-result { background: rgba(69,214,232,0.12); color: var(--tool); }
+.msg-role-badge.automation { background: rgba(245,181,68,0.14); color: var(--busy); }
+.msg-task-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 10px var(--font-mono); color: var(--text-dim); }
+.msg-time { margin-left: auto; flex-shrink: 0; font-size: 10px; font-family: var(--font-mono); color: var(--text-dim); }
+.msg-body { padding: 12px 14px 14px; font-size: 13px; line-height: 1.65; color: var(--text); overflow-wrap: anywhere; border-top: 1px solid var(--border); }
+.msg-block.assistant .msg-body { font-size: 13.25px; }
+.msg-block.system .msg-body { color: var(--text-secondary); font-size: 12px; }
 .msg-body.collapsed { display: none; }
-.msg-body pre { background: var(--bg-input); padding: 10px; border-radius: var(--r-sm); overflow-x: auto; font-size: 11px; font-family: var(--font-mono); margin-top: 8px; white-space: pre-wrap; border: 1px solid var(--border); }
-.msg-body .tool-call { background: rgba(69,214,232,0.05); border: 1px solid rgba(69,214,232,0.22); padding: 7px 11px; margin: 8px 0; border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; }
+.msg-body > pre { background: var(--bg-input); padding: 10px; border-radius: var(--r-sm); overflow: auto; font-size: 11px; font-family: var(--font-mono); margin: 0; white-space: pre-wrap; border: 1px solid var(--border); max-height: 360px; }
 .msg-role-badge.compaction_summary { background: rgba(245,181,68,0.16); color: var(--busy); }
 /* ===== RENDERED MARKDOWN (messages, live answer, reasoning) ===== */
-.md { line-height: 1.6; word-break: break-word; }
+.md { line-height: 1.65; overflow-wrap: anywhere; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
-.md p { margin: 0 0 8px; }
-.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; line-height: 1.3; font-weight: 600; }
-.md h1 { font-size: 1.35em; } .md h2 { font-size: 1.2em; } .md h3 { font-size: 1.08em; }
-.md h4, .md h5, .md h6 { font-size: 1em; color: var(--text-muted); }
-.md ul, .md ol { margin: 6px 0 8px; padding-left: 20px; }
-.md li { margin: 2px 0; }
-.md a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
-.md a:hover { color: var(--text-secondary); }
-.md strong { font-weight: 600; color: var(--text); }
+.md p { margin: 0 0 10px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 16px 0 7px; line-height: 1.28; font-weight: 650; letter-spacing: -0.01em; }
+.md h1 { font-size: 1.38em; } .md h2 { font-size: 1.22em; } .md h3 { font-size: 1.1em; }
+.md h4, .md h5, .md h6 { font-size: 1em; color: var(--text-secondary); }
+.md ul, .md ol { margin: 7px 0 10px; padding-left: 22px; }
+.md li { margin: 3px 0; padding-left: 2px; }
+.md li::marker { color: var(--text-muted); }
+.md a { color: var(--tool); text-decoration: underline; text-underline-offset: 3px; }
+.md a:hover { color: var(--text); }
+.md a:focus-visible { outline: 2px solid var(--tool); outline-offset: 2px; }
+.md strong { font-weight: 650; color: var(--text); }
 .md em { font-style: italic; }
 .md del { opacity: 0.65; }
-.md code.md-code { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 5px; font-family: var(--font-mono); font-size: 0.9em; }
-.md pre.md-pre { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
-.md pre.md-pre code { font-family: var(--font-mono); font-size: 11px; white-space: pre; background: none; border: none; padding: 0; color: var(--text); }
-.md blockquote { margin: 6px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--border-strong); color: var(--text-muted); }
-.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
-.md table.md-table { border-collapse: collapse; margin: 8px 0; font-size: 0.95em; display: block; overflow-x: auto; max-width: 100%; }
-.md table.md-table th, .md table.md-table td { border: 1px solid var(--border-strong); padding: 5px 10px; text-align: left; vertical-align: top; }
-.md table.md-table th { background: var(--bg-input); font-weight: 600; color: var(--text); }
+.md code.md-code { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 5px; font-family: var(--font-mono); font-size: 0.9em; overflow-wrap: anywhere; }
+.md pre.md-pre { background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 11px 12px; overflow-x: auto; margin: 10px 0; max-width: 100%; }
+.md pre.md-pre code { font-family: var(--font-mono); font-size: 11px; line-height: 1.55; white-space: pre; background: none; border: none; padding: 0; color: var(--text); overflow-wrap: normal; }
+.md blockquote { margin: 8px 0 10px; padding: 3px 0 3px 12px; border-left: 2px solid var(--border-strong); color: var(--text-secondary); }
+.md hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.md table.md-table { border-collapse: collapse; margin: 10px 0; font-size: 0.93em; display: block; overflow-x: auto; max-width: 100%; }
+.md table.md-table th, .md table.md-table td { border: 1px solid var(--border-strong); padding: 6px 10px; text-align: left; vertical-align: top; }
+.md table.md-table th { background: var(--bg-input); font-weight: 650; color: var(--text); }
 .md table.md-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
-.exec-step.reasoning .md, .exec-step.answer .md { font-size: 12.5px; }
+.exec-step.reasoning .md, .exec-step.answer .md { font-size: 13px; }
+/* Structured tool activity */
+.tool-disclosure { margin: 2px 0; border: 1px solid rgba(69,214,232,0.23); border-radius: var(--r-sm); background: rgba(69,214,232,0.035); overflow: hidden; }
+.tool-disclosure + .tool-disclosure { margin-top: 8px; }
+.tool-disclosure-toggle { width: 100%; min-height: 42px; display: grid; grid-template-columns: auto minmax(0, auto) auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 8px 10px; color: var(--text); text-align: left; cursor: pointer; }
+.tool-disclosure-toggle:hover { background: rgba(69,214,232,0.055); }
+.tool-disclosure-name { font: 600 11px var(--font-mono); color: var(--tool); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-state { padding: 1px 6px; border-radius: 999px; background: rgba(62,207,142,0.12); color: var(--idle); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.tool-state.running { background: rgba(245,181,68,0.13); color: var(--busy); }
+.tool-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: 10.5px; }
+.disclosure-chevron { color: var(--text-dim); transition: transform .15s; }
+[aria-expanded="true"] .disclosure-chevron { transform: rotate(180deg); }
+.tool-disclosure-body { padding: 9px 10px 10px; border-top: 1px dashed rgba(69,214,232,0.2); }
+.tool-disclosure-body.collapsed, .automation-context.collapsed { display: none; }
+.tool-section + .tool-section { margin-top: 9px; }
+.tool-section-label { margin-bottom: 4px; color: var(--text-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.tool-section pre { max-height: 300px; margin: 0; padding: 9px 10px; overflow: auto; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-secondary); font: 10.5px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Scheduled automation */
+.automation-card { display: grid; gap: 10px; }
+.automation-meta { display: flex; flex-wrap: wrap; gap: 6px; color: var(--busy); font: 10px var(--font-mono); }
+.automation-meta span { padding: 2px 7px; background: rgba(245,181,68,0.08); border: 1px solid rgba(245,181,68,0.18); border-radius: 999px; }
+.automation-label { color: var(--text-muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.automation-instruction { padding-left: 12px; border-left: 2px solid rgba(245,181,68,0.42); font-size: 13.25px; line-height: 1.65; }
+.automation-context-wrap { border-top: 1px dashed rgba(245,181,68,0.22); padding-top: 7px; }
+.automation-context-toggle { display: flex; align-items: center; gap: 6px; min-height: 34px; color: var(--text-muted); font-size: 10px; cursor: pointer; }
+.automation-context { margin-top: 4px; padding: 9px 10px; max-height: 220px; overflow: auto; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-muted); font: 10.5px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+    .msg-header { flex-wrap: wrap; padding: 8px 10px; }
+    .msg-task-id { max-width: 72px; }
+    .msg-time { margin-left: auto; }
+    .msg-body { padding: 11px; }
+    .tool-disclosure-toggle { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .tool-state { grid-column: 2; grid-row: 2; justify-self: start; }
+    .tool-preview { grid-column: 2 / 4; grid-row: 3; }
+}
 /* Compaction checkpoint divider in the History transcript */
 .cc-checkpoint { margin: 14px 0; border: 1px solid rgba(245,181,68,0.45); border-radius: var(--r-md); overflow: hidden; background: rgba(245,181,68,0.04); }
 .cc-divider { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; user-select: none; font-size: 10px; font-weight: 600; color: var(--busy); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -571,6 +617,8 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 .exec-step.reasoning .exec-label { color: var(--human); }
 .exec-step.tool .exec-label { color: var(--tool); }
 .exec-step.answer .exec-label { color: var(--idle); }
+.exec-step.usermsg.automation { border-left: 3px solid var(--busy); background: linear-gradient(110deg, rgba(245,181,68,0.055), transparent 48%), var(--bg-card); }
+.exec-step.usermsg.automation .exec-label { color: var(--busy); }
 .exec-step pre { background: var(--bg-input); padding: 8px 10px; border-radius: var(--r-sm); overflow-x: auto; font-size: 11px; font-family: var(--font-mono); margin-top: 7px; white-space: pre-wrap; word-break: break-word; max-height: 240px; border: 1px solid var(--border); }
 .exec-obs { margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--border); }
 .exec-obs strong { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -844,21 +892,25 @@ button.msg-header, button.cc-divider, button.exec-label { width: 100%; }
 </div>
 </div><!-- /left-col -->
 
-<!-- Messages / Live / Digests (right) -->
 <div class="ov ov-right" id="ov-right">
-    <div class="panel-header"><span id="msg-header">Live Execution</span>
+    <div class="panel-header"><span id="msg-header">Execution & Chat</span>
         <div class="ph-actions">
             <span style="font-size:10px;color:var(--text-muted)" id="msg-count">0</span>
             <button class="bare ov-collapse" onclick="togglePanel('ov-right')" title="Collapse" aria-label="Collapse messages panel" aria-expanded="true"><span data-icon="chevron-down" data-icon-size="12"></span></button>
         </div>
     </div>
-    <div class="view-tabs">
-        <button class="view-tab" id="tab-history" onclick="setView('history')"><span data-icon="history" data-icon-size="11"></span> History</button>
-        <button class="view-tab active" id="tab-live" onclick="setView('live')"><span class="live-dot"></span>Live Execution</button>
+    <div class="view-tabs" style="display:flex;align-items:center;gap:6px">
+        <button class="view-tab active" id="tab-live" onclick="setView('live')"><span class="live-dot"></span> Chat & Live</button>
         <button class="view-tab" id="tab-digests" onclick="setView('digests')"><span data-icon="compass" data-icon-size="11"></span> Digests</button>
+        <button class="bare" id="toggle-history-btn" onclick="toggleCollapseAllHistory()" title="Collapse or expand all history messages" style="margin-left:auto;font-size:10.5px;color:var(--text-muted);display:flex;align-items:center;gap:4px;padding:3px 7px;border-radius:var(--r-sm);background:var(--bg-input);border:1px solid var(--border);cursor:pointer;">
+            <span id="toggle-history-icon" data-icon="chevron-up" data-icon-size="11"></span>
+            <span id="toggle-history-text">Collapse History</span>
+        </button>
     </div>
-    <div class="panel-body" id="message-list" style="display:none"><div class="empty-state"><div class="empty-state-icon"><span data-icon="message-square" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
-    <div class="panel-body exec-trace" id="exec-trace"><div class="empty-state"><div class="empty-state-icon"><span data-icon="zap" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
+    <div class="panel-body unified-chat-stream" id="unified-chat-panel">
+        <div id="message-list" class="message-list"><div class="empty-state"><div class="empty-state-icon"><span data-icon="message-square" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
+        <div id="exec-trace" class="exec-trace" style="margin-top:8px"></div>
+    </div>
     <div class="panel-body" id="digest-list" style="display:none"><div class="empty-state"><div class="empty-state-icon"><span data-icon="compass" data-icon-size="26"></span></div><div>Select an agent</div></div></div>
     <div class="controls-section">
         <div style="display:flex;gap:5px">
@@ -1638,18 +1690,14 @@ function handleWS(msg) {
         case 'message_logged':
             // Only count/append messages for the agent currently being viewed,
             // otherwise the msg counter drifts up on unrelated agents' activity.
-            if (selectedAgent === payload.agent_name && viewMode === 'history') {
+            if (selectedAgent === payload.agent_name && viewMode === 'live') {
                 addMessageToUI(payload);
-                msgCount++;
-                document.getElementById('msg-count').textContent = msgCount;
             }
             break;
         case 'context_compacted':
             logEvent('system', `${payload.agent_name} ⟳ context compacted (history summarized)`);
-            if (selectedAgent === payload.agent_name && viewMode === 'history' && payload.summary) {
+            if (selectedAgent === payload.agent_name && viewMode === 'live' && payload.summary) {
                 addMessageToUI({ role: 'compaction_summary', content: payload.summary, timestamp: payload.timestamp });
-                msgCount++;
-                document.getElementById('msg-count').textContent = msgCount;
             }
             break;
         case 'human_waiting':
@@ -2290,15 +2338,37 @@ function renderTraceDetail(t) {
     const steps = Array.isArray(t.steps_json) ? t.steps_json : [];
     const history = Array.isArray(t.history_json) ? t.history_json : [];
 
+    // Coalesce consecutive reasoning/thinking chunks so single-word stream chunks render as a unified reasoning block
+    const mergedSteps = [];
+    for (const s of steps) {
+        const last = mergedSteps[mergedSteps.length - 1];
+        if (last && (s.type === 'reasoning' || s.type === 'thinking') && last.type === s.type) {
+            last.text = (last.text || '') + (s.type === 'thinking' ? ' ' : '') + (s.text || '');
+        } else {
+            mergedSteps.push({ ...s });
+        }
+    }
+
     // Steps HTML
-    const stepsHtml = steps.length ? steps.map((s, i) => {
+    const stepsHtml = mergedSteps.length ? mergedSteps.map((s, i) => {
         const stype = s.type || 'unknown';
         let label = stype;
         let detail = '';
-        if (stype === 'tool_start') { label = s.name || 'tool'; detail = s.args || ''; }
-        else if (stype === 'tool_result') { label = s.name || 'tool'; detail = s.result || ''; }
-        else if (stype === 'thinking') { label = 'thinking'; detail = s.text || ''; }
-        else if (stype === 'reasoning') { label = 'reasoning'; detail = s.text || ''; }
+        if (stype === 'tool_start') {
+            label = s.name || 'tool';
+            detail = s.args || '';
+        } else if (stype === 'tool_result') {
+            label = s.name || 'tool';
+            detail = s.result || '';
+        } else if (stype === 'thinking') {
+            const preview = (s.text || '').replace(/\s+/g, ' ').trim();
+            label = preview ? (preview.length > 70 ? preview.slice(0, 68) + '…' : preview) : 'thinking';
+            detail = s.text || '';
+        } else if (stype === 'reasoning') {
+            const preview = (s.text || '').replace(/\s+/g, ' ').trim();
+            label = preview ? (preview.length > 80 ? preview.slice(0, 78) + '…' : preview) : 'Thinking process';
+            detail = s.text || '';
+        }
         const stepTs = s.ts ? new Date(s.ts * 1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
         return `<div class="obs-step">
             <div class="obs-step-header" onclick="obsToggleStep(this)">
@@ -2307,7 +2377,7 @@ function renderTraceDetail(t) {
                 ${stepTs ? `<span style="font-size:10px;color:var(--text-dim);flex-shrink:0">${stepTs}</span>` : ''}
                 <span style="color:var(--text-dim);flex-shrink:0" data-icon="chevron-right" data-icon-size="11"></span>
             </div>
-            ${detail ? `<div class="obs-step-body">${esc(detail)}</div>` : ''}
+            ${detail ? `<div class="obs-step-body">${stype === 'reasoning' ? `<div class="md">${mdToHtml(detail)}</div>` : `<pre style="margin:0;white-space:pre-wrap;font-family:var(--font-mono);font-size:11px">${esc(detail)}</pre>`}</div>` : ''}
         </div>`;
     }).join('') : '<div style="color:var(--text-muted);font-size:11px;padding:6px 0">No steps recorded</div>';
 
@@ -2560,43 +2630,152 @@ async function doDeleteTaskDetail() {
 
 function addMessageToUI(msg) {
     const container = document.getElementById('message-list');
+    const scrollContainer = document.getElementById('unified-chat-panel') || container;
     if (container.querySelector('.empty-state')) container.innerHTML = '';
-    // Only auto-scroll if the user is already near the bottom, so a live append
-    // doesn't yank them away while they're scrolled up reading older history.
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+    const nearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 120;
     container.insertAdjacentHTML('beforeend', messageBlockHTML(msg));
-    if (nearBottom) container.scrollTop = container.scrollHeight;
+    msgCount++;
+    document.getElementById('msg-count').textContent = msgCount;
+    if (nearBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
+}
+
+function parseScheduledWakeup(content) {
+    const raw = String(content || '');
+    const marker = '[SCHEDULED WAKE-UP';
+    const start = raw.indexOf(marker);
+    if (start < 0) return null;
+    const prefix = raw.slice(0, start);
+    const direct = start === 0;
+    const wrapped = /^You have \d+ new message\(s\) to process:[\s\S]*?from cron\s+--\s*$/i.test(prefix.trim());
+    if (!direct && !wrapped) return null;
+    const close = raw.indexOf(']\n', start);
+    const goal = 'Carry out the instruction, then end your turn (do not loop):';
+    const goalAt = raw.indexOf(goal, close + 2);
+    if (close < 0 || goalAt < 0) return null;
+    const header = raw.slice(start + 1, close);
+    const meta = header.match(/^SCHEDULED WAKE-UP\s+[—-]\s+cron\s+'([^']+)'\s+fired at\s+([^;]+);\s*scheduled\s+([^;]+);/i);
+    const sectionStart = prefix.lastIndexOf('--[');
+    const leading = sectionStart > 0
+        ? prefix.slice(0, sectionStart).replace(/^You have \d+ new message\(s\) to process:\s*/i, '').trim()
+        : '';
+    return {
+        schedule: meta ? meta[1] : '',
+        firedAt: meta ? meta[2] : '',
+        scheduledAgo: meta ? meta[3] : '',
+        leading,
+        context: raw.slice(close + 2, goalAt).trim(),
+        instruction: raw.slice(goalAt + goal.length).trim(),
+    };
+}
+
+function classifyMessage(msg) {
+    const raw = String(msg.content || '');
+    if (msg.role === 'compaction_summary') return 'compaction';
+    if (parseScheduledWakeup(raw) || msg.source === 'cron' || msg.from_agent === 'cron') return 'automation';
+    if (msg.tool_calls && msg.tool_calls.length) return 'tool-call';
+    if (raw.startsWith('🛠️ Tool Calls:') || /^🛠️\s*[^\n]+→/u.test(raw)) return 'tool-call';
+    if (raw.startsWith('📤 Tool Result') || msg.role === 'tool') return 'tool-result';
+    return ['user', 'assistant', 'system'].includes(msg.role) ? msg.role : 'system';
+}
+
+function messagePresentation(msg) {
+    const kind = classifyMessage(msg);
+    const map = {
+        user: ['User / Task', 'user'], assistant: ['Assistant', 'pen'], system: ['System', 'settings'],
+        tool: ['Tool', 'wrench'], 'tool-call': ['Tool call', 'wrench'], 'tool-result': ['Tool result', 'terminal'],
+        automation: ['Scheduled wake-up', 'clock'], compaction: ['Context compacted', 'refresh'],
+    };
+    const [label, iconName] = map[kind] || map.system;
+    return { kind, label, iconName };
+}
+
+function prettyToolValue(value) {
+    const text = typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2);
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch (_) { return text; }
+}
+
+function toolPreview(value) {
+    return prettyToolValue(value).replace(/\s+/g, ' ').trim().slice(0, 120) || 'No details';
+}
+
+function parseCompactToolRecord(raw) {
+    const text = String(raw || '').trim();
+    const match = text.match(/^🛠️\s*([^({\s]+)\(([\s\S]*)\)\s*→\s*([\s\S]*)$/u);
+    return match ? { name: match[1], input: match[2], output: match[3] } : null;
+}
+
+function renderToolDisclosure(tool) {
+    const name = tool.name || 'tool';
+    const input = prettyToolValue(tool.input || '');
+    const output = tool.output == null ? null : prettyToolValue(tool.output);
+    const running = output == null;
+    return `<div class="tool-disclosure">
+        <button class="bare tool-disclosure-toggle" aria-expanded="false" onclick="toggleNext(this)">
+            ${icon('wrench', 12)}<span class="tool-disclosure-name">${esc(name)}</span>
+            <span class="tool-state ${running ? 'running' : ''}">${running ? 'running' : 'complete'}</span>
+            <span class="tool-preview">${esc(toolPreview(output == null ? input : output))}</span>
+            <span class="disclosure-chevron">${icon('chevron-down', 12)}</span>
+        </button>
+        <div class="tool-disclosure-body collapsed">
+            ${input ? `<div class="tool-section"><div class="tool-section-label">Input</div><pre>${esc(input)}</pre></div>` : ''}
+            ${output != null ? `<div class="tool-section"><div class="tool-section-label">Output</div><pre>${esc(output)}</pre></div>` : ''}
+        </div>
+    </div>`;
+}
+
+function renderAutomation(msg) {
+    const wakeup = parseScheduledWakeup(msg.content);
+    if (!wakeup) return `<div class="md">${mdToHtml(msg.content || '')}</div>`;
+    const meta = [wakeup.schedule && `cron ${wakeup.schedule}`, wakeup.firedAt && `fired ${wakeup.firedAt}`, wakeup.scheduledAgo && `scheduled ${wakeup.scheduledAgo}`].filter(Boolean);
+    return `<div class="automation-card">
+        ${wakeup.leading ? `<div><div class="automation-label">Other queued work</div><div class="md">${mdToHtml(wakeup.leading)}</div></div>` : ''}
+        ${meta.length ? `<div class="automation-meta">${meta.map(x => `<span>${esc(x)}</span>`).join('')}</div>` : ''}
+        <div><div class="automation-label">Instruction</div><div class="automation-instruction md">${mdToHtml(wakeup.instruction)}</div></div>
+        ${wakeup.context ? `<div class="automation-context-wrap"><button class="bare automation-context-toggle" aria-expanded="false" onclick="toggleNext(this)">${icon('settings', 11)} Automation context <span class="disclosure-chevron">${icon('chevron-down', 11)}</span></button><div class="automation-context collapsed">${esc(wakeup.context)}</div></div>` : ''}
+    </div>`;
 }
 
 function formatMessageContent(msg) {
     const raw = msg.content || '';
-    // Tool-call / tool-result dumps are pre-formatted text — keep them verbatim.
-    if (raw.startsWith('🛠️ Tool Calls:') || raw.startsWith('📤 Tool Result')) {
-        return `<pre>${esc(raw)}</pre>`;
+    const kind = classifyMessage(msg);
+    if (kind === 'automation') return renderAutomation(msg);
+    if (msg.tool_calls && msg.tool_calls.length) {
+        const tools = msg.tool_calls.map(tc => { const fn = tc.function || {}; return renderToolDisclosure({ name: fn.name, input: fn.arguments, output: tc.result }); }).join('');
+        return tools + (raw ? `<div class="md" style="margin-top:10px">${mdToHtml(raw)}</div>` : '');
     }
-    if (msg.tool_calls) {
-        let html = '';
-        msg.tool_calls.forEach(tc => {
-            const fn = tc.function || {};
-            html += `<div class="tool-call"><strong>${esc(fn.name || '?')}</strong><pre>${esc(fn.arguments || '{}')}</pre></div>`;
+    const compactTool = parseCompactToolRecord(raw);
+    if (compactTool) return renderToolDisclosure(compactTool);
+    if (kind === 'tool-call' || kind === 'tool-result') {
+        return renderToolDisclosure({
+            name: kind === 'tool-result' ? 'Tool result' : 'Recorded tool call',
+            input: kind === 'tool-call' ? raw.replace(/^🛠️ Tool Calls:\s*/u, '') : '',
+            output: kind === 'tool-result' ? raw.replace(/^📤 Tool Result:?\s*/u, '') : null,
         });
-        return html + (raw ? `<div class="md" style="margin-top:6px">${mdToHtml(raw)}</div>` : '');
     }
     return raw ? `<div class="md">${mdToHtml(raw)}</div>` : '<em style="color:var(--text-muted)">(no text content)</em>';
 }
 
-/* ===== LIVE EXECUTION TRACE ===== */
+/* ===== LIVE EXECUTION TRACE & CONSOLIDATED CHAT ===== */
 function setView(mode) {
+    if (mode === 'history') mode = 'live'; // backward compatibility
     viewMode = mode;
-    document.getElementById('tab-history').classList.toggle('active', mode === 'history');
-    document.getElementById('tab-live').classList.toggle('active', mode === 'live');
-    document.getElementById('tab-digests').classList.toggle('active', mode === 'digests');
-    document.getElementById('message-list').style.display = mode === 'history' ? '' : 'none';
-    document.getElementById('exec-trace').style.display = mode === 'live' ? '' : 'none';
-    document.getElementById('digest-list').style.display = mode === 'digests' ? '' : 'none';
+    const liveTab = document.getElementById('tab-live');
+    const digestsTab = document.getElementById('tab-digests');
+    const chatPanel = document.getElementById('unified-chat-panel');
+    const digestList = document.getElementById('digest-list');
+    const toggleBtn = document.getElementById('toggle-history-btn');
+
+    if (liveTab) liveTab.classList.toggle('active', mode === 'live');
+    if (digestsTab) digestsTab.classList.toggle('active', mode === 'digests');
+    if (chatPanel) chatPanel.style.display = mode === 'live' ? 'flex' : 'none';
+    if (digestList) digestList.style.display = mode === 'digests' ? '' : 'none';
+    if (toggleBtn) toggleBtn.style.display = mode === 'live' ? 'flex' : 'none';
+
     const who = selectedAgent ? (agentData[selectedAgent]?.config?.name || selectedAgent) : '';
-    if (mode === 'history' && selectedAgent) document.getElementById('msg-header').textContent = `Messages: ${who}`;
-    if (mode === 'live') { document.getElementById('msg-header').textContent = who ? `Live: ${who}` : 'Live Execution'; renderExecTrace(); }
+    if (mode === 'live') {
+        document.getElementById('msg-header').textContent = who ? `${who}` : 'Chat & Live Execution';
+        renderExecTrace();
+    }
     if (mode === 'digests' && selectedAgent) loadAgentDigests(selectedAgent);
 }
 
@@ -2697,6 +2876,7 @@ function scheduleExecRender() {
 
 function renderExecTrace() {
     const container = document.getElementById('exec-trace');
+    const scrollContainer = document.getElementById('unified-chat-panel') || container;
     if (!container) return;
 
     // Reset the DOM when the shown agent changes, so a fresh turn animates in
@@ -2707,14 +2887,19 @@ function renderExecTrace() {
     }
 
     if (!selectedAgent) {
-        container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Select an agent</div></div>`;
+        container.innerHTML = '';
         return;
     }
     const steps = execTrace[selectedAgent] || [];
     const answer = execAnswer[selectedAgent] || '';
     const status = execStatus[selectedAgent];
+    const hasHistory = msgCount > 0;
     if (!steps.length && !answer && !status) {
-        container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>`;
+        if (!hasHistory) {
+            container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('zap', 26)}</div><div>Idle — the next turn will stream here live (thinking → tools → answer).</div></div>`;
+        } else {
+            container.innerHTML = '';
+        }
         return;
     }
 
@@ -2727,34 +2912,31 @@ function renderExecTrace() {
         if (s.type === 'system') {
             items.push({ key, className: 'exec-step sysmsg', inner: `<button class="bare exec-label" aria-expanded="false" onclick="toggleNext(this)">${icon('settings', 11)} System context · click to expand</button><pre class="collapsed" style="max-height:200px">${esc(s.text)}</pre>` });
         } else if (s.type === 'user') {
-            items.push({ key, className: 'exec-step usermsg', inner: `<div class="exec-label">${icon('user', 11)} User / Task</div><pre>${esc(s.text)}</pre>` });
+            const liveMsg = { role: 'user', content: s.text };
+            const presentation = messagePresentation(liveMsg);
+            items.push({ key, className: `exec-step usermsg ${presentation.kind}`, inner: `<div class="exec-label">${icon(presentation.iconName, 11)} ${esc(presentation.label)}</div><div style="margin-top:8px">${formatMessageContent(liveMsg)}</div>` });
         } else if (s.type === 'reasoning') {
             items.push({ key, className: 'exec-step reasoning', inner: `<div class="exec-label">${icon('brain', 11)} Thinking</div><div class="md">${mdToHtml(s.text)}</div>` });
         } else if (s.type === 'tool') {
-            const obs = s.result != null
-                ? `<div class="exec-obs"><strong>↳ Output</strong><pre>${esc(s.result)}</pre></div>`
-                : '<div class="exec-obs"><em style="color:var(--text-muted)">running…</em></div>';
-            items.push({ key, className: 'exec-step tool', inner: `<div class="exec-label">${icon('wrench', 11)} Tool Call · ${esc(s.name || 'tool')}</div><pre>${esc(s.args)}</pre>${obs}` });
+            items.push({ key, className: 'exec-step tool', inner: renderToolDisclosure({ name: s.name || 'tool', input: s.args, output: s.result }) });
         }
     });
     if (answer) {
         items.push({ key: 'answer', className: 'exec-step answer', inner: `<div class="exec-label">${icon('pen', 11)} Response</div><div class="md" style="margin-top:6px;word-break:break-word">${mdToHtml(answer)}</div>` });
     }
     if (status) {
-        items.push({ key: 'status', className: 'exec-status', inner: `<span class="live-dot"></span>${esc(status)}` });
+        items.push({ key: 'status', className: 'exec-status', inner: `<div role="status" aria-live="polite"><span class="live-dot"></span>${esc(status)}</div>` });
     }
 
     // Only autoscroll if the user is already near the bottom, so updating in
     // place doesn't yank someone who scrolled up to read an earlier step.
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 60;
+    const nearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 120;
 
     // Reconcile keyed nodes instead of rebuilding innerHTML. NEW keys are
     // created and inserted — so .exec-step's slideIn entrance animation plays
     // exactly ONCE per step. EXISTING nodes are updated in place (only when
     // their content actually changed) and never re-inserted, so they never
-    // replay the animation. This is the flicker fix: the old full innerHTML
-    // rebuild re-ran slideIn on every node on every ~80ms streamed-token batch,
-    // which read as the whole panel flashing during inference.
+    // replay the animation.
     const existing = new Map();
     for (const ch of Array.from(container.children)) {
         if (ch.dataset.k) existing.set(ch.dataset.k, ch);
@@ -2780,7 +2962,7 @@ function renderExecTrace() {
     }
     for (const node of existing.values()) container.removeChild(node);
 
-    if (nearBottom) container.scrollTop = container.scrollHeight;
+    if (nearBottom) scrollContainer.scrollTop = scrollContainer.scrollHeight;
 }
 
 /* ===== AGENT CONFIG ===== */
@@ -3226,30 +3408,48 @@ function fmtDuration(seconds) {
     return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
 }
 
+let historyCollapsed = false;
+
+function toggleCollapseAllHistory() {
+    historyCollapsed = !historyCollapsed;
+    const btn = document.getElementById('toggle-history-btn');
+    const iconSpan = document.getElementById('toggle-history-icon');
+    const textSpan = document.getElementById('toggle-history-text');
+
+    document.querySelectorAll('#message-list .msg-body, #message-list .cc-body').forEach(el => {
+        el.classList.toggle('collapsed', historyCollapsed);
+        const header = el.previousElementSibling;
+        if (header && (header.classList.contains('msg-header') || header.classList.contains('cc-divider'))) {
+            header.setAttribute('aria-expanded', String(!historyCollapsed));
+        }
+    });
+
+    if (textSpan) textSpan.textContent = historyCollapsed ? 'Expand History' : 'Collapse History';
+    if (iconSpan) {
+        iconSpan.dataset.icon = historyCollapsed ? 'chevron-down' : 'chevron-up';
+        if (btn) hydrateIcons(btn);
+    }
+}
+
 // Shared renderer for a single transcript entry (used by initial load + live
 // append). compaction_summary renders as a collapsible checkpoint divider.
+// By default, messages render expanded so the entire chat is visible as a continuous thread.
 function messageBlockHTML(m) {
-    const role = m.role || 'unknown';
+    const presentation = messagePresentation(m);
     const ts = fmtMsgTime(m.timestamp);
-    if (role === 'compaction_summary') {
-        return `<div class="cc-checkpoint" data-compaction="1">
-            <button class="bare cc-divider" aria-expanded="false" onclick="toggleNext(this)">
-                <span class="cc-label">⟳ Context compacted</span>
-                <span class="cc-time">${ts} · everything above was summarized · click to view</span>
-            </button>
-            <div class="cc-body collapsed">${esc(m.content || '')}</div>
-        </div>`;
+    const isCollapsed = historyCollapsed;
+    if (presentation.kind === 'compaction') {
+        return `<div class="cc-checkpoint" data-compaction="1"><button class="bare cc-divider" aria-expanded="${!isCollapsed}" onclick="toggleNext(this)"><span class="cc-label">⟳ Context compacted</span><span class="cc-time">${ts} · everything above was summarized · click to view</span></button><div class="cc-body ${isCollapsed ? 'collapsed' : ''}">${esc(m.content || '')}</div></div>`;
     }
-    const hasToolCall = (m.content || '').startsWith('🛠️ Tool Calls:') || (m.tool_calls && m.tool_calls.length);
-    return `<div class="msg-block">
-        <button class="bare msg-header" aria-expanded="false" onclick="toggleNext(this)">
-            <span class="msg-role-badge ${role}">${esc(role)}</span>
-            <span style="font-size:10px;color:var(--text-muted)">${esc((m.task_id || '').slice(0, 8))}</span>
-            ${hasToolCall ? `<span style="font-size:10px;color:var(--tool);margin-left:4px">${icon('wrench', 10)} tools</span>` : ''}
+    const taskId = (m.task_id || '').slice(0, 8);
+    return `<article class="msg-block ${presentation.kind}" aria-label="${escAttr(presentation.label)} message">
+        <button class="bare msg-header" aria-expanded="${!isCollapsed}" onclick="toggleNext(this)">
+            <span class="msg-role-badge ${presentation.kind}">${icon(presentation.iconName, 11)} ${esc(presentation.label)}</span>
+            ${taskId ? `<span class="msg-task-id" title="Task ${escAttr(m.task_id)}">${esc(taskId)}</span>` : ''}
             <span class="msg-time">${ts}</span>
         </button>
-        <div class="msg-body collapsed">${formatMessageContent(m)}</div>
-    </div>`;
+        <div class="msg-body ${isCollapsed ? 'collapsed' : ''}">${formatMessageContent(m)}</div>
+    </article>`;
 }
 
 async function loadMessages(agentName) {
@@ -3261,28 +3461,40 @@ async function loadMessages(agentName) {
         // don't clobber the DOM with results for the previous agent.
         if (selectedAgent !== agentName) return;
         const container = document.getElementById('message-list');
-        if (viewMode === 'history') document.getElementById('msg-header').textContent = `Messages: ${agentData[agentName]?.config?.name || agentName}`;
-        // Endpoint returns newest-first; render chronologically (oldest → newest).
-        const msgs = (data.messages || []).slice().reverse();
+        const scrollContainer = document.getElementById('unified-chat-panel') || container;
+        if (viewMode === 'live') {
+            document.getElementById('msg-header').textContent = `${agentData[agentName]?.config?.name || agentName}`;
+        }
+        // Endpoint already returns chronological history (oldest → newest).
+        const msgs = data.messages || [];
         if (!msgs.length) {
-            container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('message-square', 26)}</div><div>No messages</div></div>`;
+            container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">${icon('message-square', 26)}</div><div>No messages yet</div></div>`;
             document.getElementById('msg-count').textContent = '0';
+            msgCount = 0;
+            renderExecTrace();
             return;
         }
         msgCount = msgs.length;
         document.getElementById('msg-count').textContent = msgCount;
         container.innerHTML = msgs.map(messageBlockHTML).join('');
+
+        // If turn is complete, clear finished trace so it does not duplicate
+        if (execStatus[agentName] == null && execAnswer[agentName]) {
+            execTrace[agentName] = [];
+            execAnswer[agentName] = '';
+            renderExecTrace();
+        }
+
         // Anchor the viewport to the LATEST compaction checkpoint: the summary +
         // everything after it (current execution) is in view; older history sits
         // above and is reachable by scrolling up. No compaction → show the tail.
         const cps = container.querySelectorAll('[data-compaction="1"]');
         if (cps.length) {
             // Align the latest checkpoint to the top of the scroll container
-            // (rect delta is robust to offsetParent positioning).
             const last = cps[cps.length - 1];
-            container.scrollTop += last.getBoundingClientRect().top - container.getBoundingClientRect().top;
+            scrollContainer.scrollTop += last.getBoundingClientRect().top - scrollContainer.getBoundingClientRect().top;
         } else {
-            container.scrollTop = container.scrollHeight;
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
         }
     } catch (e) { console.error(e); }
 }
@@ -3320,8 +3532,11 @@ function updateStats() {
 function selectAgent(name) {
     selectedAgent = name;
     renderAgents();
-    if (name) loadMessages(name);
-    if (viewMode === 'live') { document.getElementById('msg-header').textContent = name ? `Live: ${agentData[name]?.config?.name || name}` : 'Live Execution'; renderExecTrace(); }
+    if (name) {
+        loadMessages(name);
+        document.getElementById('msg-header').textContent = `${agentData[name]?.config?.name || name}`;
+        renderExecTrace();
+    }
     if (viewMode === 'digests' && name) loadAgentDigests(name);
 }
 
