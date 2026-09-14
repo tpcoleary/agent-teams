@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Manual start / stop / restart / status for Agent Teams (Hermes swarm) on :8000.
 
@@ -60,7 +60,7 @@ function Resolve-Launcher {
             Args     = @('-m', 'teams_server.cli', 'up')
         }
     }
-    throw "No Agent Teams launcher found. Expected $VenvCli or $VenvPython — run install in $RepoRoot first."
+    throw "No Agent Teams launcher found. Expected $VenvCli or $VenvPython - run install in $RepoRoot first."
 }
 
 function New-LogPaths {
@@ -148,8 +148,8 @@ function Show-Status {
         }
     }
     if (Test-Path -LiteralPath $PidFile) {
-        $pidText = (Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-        Write-Host "         pidfile=$pidText" -ForegroundColor DarkGray
+        $savedPid = (Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        Write-Host "         pidfile=$savedPid" -ForegroundColor DarkGray
     }
     return $up
 }
